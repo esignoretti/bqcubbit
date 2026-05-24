@@ -71,6 +71,28 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		completed_at TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, lease_expires_at);
+	CREATE TABLE IF NOT EXISTS schema_versions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		table_id INTEGER NOT NULL REFERENCES tables(id),
+		version INTEGER NOT NULL,
+		schema_hash TEXT NOT NULL,
+		schema_json TEXT NOT NULL,
+		change_type TEXT NOT NULL,
+		changes_json TEXT,
+		valid_from TIMESTAMP NOT NULL,
+		UNIQUE(table_id, version)
+	);
+	CREATE TABLE IF NOT EXISTS partitions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		table_id INTEGER NOT NULL REFERENCES tables(id),
+		partition_id TEXT NOT NULL,
+		schema_version INTEGER NOT NULL DEFAULT 1,
+		bq_last_modified TIMESTAMP NOT NULL,
+		last_successful_sync TIMESTAMP,
+		row_count INTEGER DEFAULT 0,
+		bytes_in_cubbit INTEGER DEFAULT 0,
+		UNIQUE(table_id, partition_id)
+	);
 	`
 	_, err := s.db.ExecContext(ctx, schema)
 	return err
@@ -188,6 +210,53 @@ func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID, state string,
 		return fmt.Errorf("task %s: optimistic lock failed (generation mismatch)", taskID)
 	}
 	return nil
+}
+
+func (s *SQLiteStore) RecordSchemaVersion(ctx context.Context, sv *SchemaVersion) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO schema_versions (table_id, version, schema_hash, schema_json, change_type, changes_json, valid_from)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sv.TableID, sv.Version, sv.SchemaHash, sv.SchemaJSON, sv.ChangeType, sv.ChangesJSON, sv.ValidFrom)
+	if err != nil {
+		return fmt.Errorf("record schema version: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetCurrentSchemaVersion(ctx context.Context, tableID int64) (*SchemaVersion, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, table_id, version, schema_hash, schema_json, change_type, COALESCE(changes_json,''), valid_from
+		 FROM schema_versions WHERE table_id=? ORDER BY version DESC LIMIT 1`, tableID)
+	sv := &SchemaVersion{}
+	if err := row.Scan(&sv.ID, &sv.TableID, &sv.Version, &sv.SchemaHash, &sv.SchemaJSON, &sv.ChangeType, &sv.ChangesJSON, &sv.ValidFrom); err != nil {
+		return nil, fmt.Errorf("get current schema version: %w", err)
+	}
+	return sv, nil
+}
+
+func (s *SQLiteStore) GetOrCreatePartition(ctx context.Context, tableID int64, partitionID string) (*PartitionState, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, table_id, partition_id, schema_version, bq_last_modified, last_successful_sync, row_count, bytes_in_cubbit
+		 FROM partitions WHERE table_id=? AND partition_id=?`, tableID, partitionID)
+	ps := &PartitionState{}
+	var lastSync *time.Time
+	err := row.Scan(&ps.ID, &ps.TableID, &ps.PartitionID, &ps.SchemaVersion, &ps.BQLastModified, &lastSync, &ps.RowCount, &ps.BytesInCubbit)
+	if err == sql.ErrNoRows {
+		now := time.Now().UTC()
+		res, err := s.db.ExecContext(ctx,
+			`INSERT INTO partitions (table_id, partition_id, bq_last_modified) VALUES (?, ?, ?)`,
+			tableID, partitionID, now)
+		if err != nil {
+			return nil, fmt.Errorf("create partition: %w", err)
+		}
+		id, _ := res.LastInsertId()
+		return &PartitionState{ID: id, TableID: tableID, PartitionID: partitionID, SchemaVersion: 1, BQLastModified: now}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get partition: %w", err)
+	}
+	ps.LastSuccessfulSync = lastSync
+	return ps, nil
 }
 
 func (s *SQLiteStore) Close() error {

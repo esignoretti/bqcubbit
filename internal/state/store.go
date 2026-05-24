@@ -44,6 +44,28 @@ type Task struct {
 	CompletedAt     *time.Time
 }
 
+type SchemaVersion struct {
+	ID          int64
+	TableID     int64
+	Version     int
+	SchemaHash  string
+	SchemaJSON  string
+	ChangeType  string
+	ChangesJSON string
+	ValidFrom   time.Time
+}
+
+type PartitionState struct {
+	ID                 int64
+	TableID            int64
+	PartitionID        string
+	SchemaVersion      int
+	BQLastModified     time.Time
+	LastSuccessfulSync *time.Time
+	RowCount           int64
+	BytesInCubbit      int64
+}
+
 type StateStore interface {
 	Init(ctx context.Context) error
 	BeginRun(ctx context.Context) (*SyncRun, error)
@@ -53,5 +75,8 @@ type StateStore interface {
 	CreateTasks(ctx context.Context, tasks []Task) error
 	ClaimTask(ctx context.Context, workerID string) (*Task, error)
 	UpdateTaskState(ctx context.Context, taskID, state string, generation int) error
+	RecordSchemaVersion(ctx context.Context, sv *SchemaVersion) error
+	GetCurrentSchemaVersion(ctx context.Context, tableID int64) (*SchemaVersion, error)
+	GetOrCreatePartition(ctx context.Context, tableID int64, partitionID string) (*PartitionState, error)
 	Close() error
 }

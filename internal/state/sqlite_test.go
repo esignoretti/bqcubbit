@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestSQLiteStore(t *testing.T) {
@@ -67,5 +68,41 @@ func TestSQLiteStore(t *testing.T) {
 
 	if err := store.CompleteRun(ctx, run.ID, "completed"); err != nil {
 		t.Fatalf("CompleteRun: %v", err)
+	}
+
+	sv := &SchemaVersion{
+		TableID:    ts.ID,
+		Version:    1,
+		SchemaHash: "abc123",
+		SchemaJSON: `{"type":"record"}`,
+		ChangeType: "initial",
+		ValidFrom:  time.Now().UTC(),
+	}
+	if err := store.RecordSchemaVersion(ctx, sv); err != nil {
+		t.Fatalf("RecordSchemaVersion: %v", err)
+	}
+
+	gotSV, err := store.GetCurrentSchemaVersion(ctx, ts.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentSchemaVersion: %v", err)
+	}
+	if gotSV.SchemaHash != "abc123" {
+		t.Fatalf("expected schema hash abc123, got %s", gotSV.SchemaHash)
+	}
+
+	ps, err := store.GetOrCreatePartition(ctx, ts.ID, "p20250101")
+	if err != nil {
+		t.Fatalf("GetOrCreatePartition: %v", err)
+	}
+	if ps.PartitionID != "p20250101" {
+		t.Fatalf("expected partition p20250101, got %s", ps.PartitionID)
+	}
+
+	ps2, err := store.GetOrCreatePartition(ctx, ts.ID, "p20250101")
+	if err != nil {
+		t.Fatalf("GetOrCreatePartition second: %v", err)
+	}
+	if ps2.ID != ps.ID {
+		t.Fatalf("expected same partition id %d, got %d", ps.ID, ps2.ID)
 	}
 }
