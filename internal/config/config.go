@@ -29,8 +29,17 @@ type DestinationConfig struct {
 	CompressionLevel int    `yaml:"compression_level"`
 }
 
+type TableSyncConfig struct {
+	Match               string `yaml:"match"`
+	IncrementalStrategy string `yaml:"incremental_strategy"`
+}
+
 type SyncConfig struct {
-	Table string `yaml:"table"`
+	Table               string            `yaml:"table"`
+	Datasets            []string          `yaml:"datasets"`
+	IncrementalStrategy string            `yaml:"incremental_strategy"`
+	Tables              []TableSyncConfig `yaml:"tables"`
+	MaxConcurrent       int               `yaml:"max_concurrent"`
 }
 
 func (c *Config) Validate() error {
@@ -55,6 +64,10 @@ func Default() *Config {
 			Prefix:           "bq-export/",
 			Compression:      "zstd",
 			CompressionLevel: 9,
+		},
+		Sync: SyncConfig{
+			IncrementalStrategy: "full_refresh",
+			MaxConcurrent:       1,
 		},
 	}
 }

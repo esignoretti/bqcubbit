@@ -15,3 +15,11 @@ destination:
 
 sync:
   table: analytics.events
+  datasets:
+    - analytics
+  incremental_strategy: full_refresh
+  max_concurrent: 4
+  tables:
+    - match: analytics.events
+    - match: analytics.users
+      incremental_strategy: partition
