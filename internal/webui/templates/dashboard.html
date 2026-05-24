@@ -1,0 +1,28 @@
+{{define "content"}}
+<h1>Dashboard</h1>
+<div class="card" hx-get="/api/status" hx-trigger="every 10s" hx-swap="innerHTML">
+    <p>Status: <span class="status-running">running</span></p>
+</div>
+<div class="card">
+    <h2>Tables</h2>
+    <table>
+        <tr><th>Table</th><th>Last Sync</th><th>Partitions</th><th>Schema Version</th></tr>
+        {{range .Tables}}
+        <tr>
+            <td><a href="/table/{{.Dataset}}/{{.Name}}">{{.Dataset}}.{{.Name}}</a></td>
+            <td>{{.LastSync}}</td>
+            <td>{{.PartitionCount}}</td>
+            <td>v{{.SchemaVersion}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="4">No tables configured</td></tr>
+        {{end}}
+    </table>
+</div>
+<div class="card">
+    <h2>Live Logs</h2>
+    <div class="log-box" hx-ext="sse" sse-connect="/api/logs" sse-swap="message">
+        Waiting for logs...
+    </div>
+</div>
+{{end}}

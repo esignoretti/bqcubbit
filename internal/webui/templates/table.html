@@ -1,0 +1,25 @@
+{{define "content"}}
+<h1>{{.Dataset}}.{{.Table}}</h1>
+<div class="card">
+    <h2>Schema Versions</h2>
+    <table>
+        <tr><th>Version</th><th>Change Type</th><th>Valid From</th></tr>
+        {{range .SchemaVersions}}
+        <tr><td>v{{.Version}}</td><td>{{.ChangeType}}</td><td>{{.ValidFrom}}</td></tr>
+        {{else}}
+        <tr><td colspan="3">No schema versions</td></tr>
+        {{end}}
+    </table>
+</div>
+<div class="card">
+    <h2>Partitions</h2>
+    <table>
+        <tr><th>Partition</th><th>Schema Version</th><th>Last Sync</th><th>Rows</th><th>Bytes</th></tr>
+        {{range .Partitions}}
+        <tr><td>{{.PartitionID}}</td><td>v{{.SchemaVersion}}</td><td>{{.LastSync}}</td><td>{{.RowCount}}</td><td>{{.BytesInCubbit}}</td></tr>
+        {{else}}
+        <tr><td colspan="5">No partitions synced</td></tr>
+        {{end}}
+    </table>
+</div>
+{{end}}
