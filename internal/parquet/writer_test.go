@@ -73,3 +73,43 @@ func TestWriteStream(t *testing.T) {
 		t.Fatalf("expected 100 rows, got %d", tbl.NumRows())
 	}
 }
+
+func TestWriteStreamResult(t *testing.T) {
+	pool := memory.NewGoAllocator()
+	schema := arrow.NewSchema(
+		[]arrow.Field{
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+			{Name: "name", Type: arrow.BinaryTypes.String},
+		},
+		nil,
+	)
+
+	batches := make(chan arrow.Record, 1)
+	go func() {
+		defer close(batches)
+		idBldr := array.NewInt64Builder(pool)
+		idBldr.AppendValues([]int64{1, 2, 3}, nil)
+		idCol := idBldr.NewInt64Array()
+
+		nameBldr := array.NewStringBuilder(pool)
+		nameBldr.AppendValues([]string{"a", "b", "c"}, nil)
+		nameCol := nameBldr.NewStringArray()
+
+		batch := array.NewRecord(schema, []arrow.Array{idCol, nameCol}, 3)
+		batches <- batch
+	}()
+
+	var buf bytes.Buffer
+	pw := NewWriter(DefaultWriterConfig())
+	result, err := pw.WriteStreamResult(&buf, schema, batches)
+	if err != nil {
+		t.Fatalf("WriteStreamResult failed: %v", err)
+	}
+
+	if result.RowCount != 3 {
+		t.Fatalf("expected RowCount 3, got %d", result.RowCount)
+	}
+	if result.TotalBytes <= 0 {
+		t.Fatalf("expected TotalBytes > 0, got %d", result.TotalBytes)
+	}
+}

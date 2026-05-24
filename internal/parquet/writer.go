@@ -56,6 +56,41 @@ func NewWriter(cfg WriterConfig) *Writer {
 	return &Writer{props: props, arrowProps: arrowProps}
 }
 
+type WriteResult struct {
+	TotalBytes int64
+	RowCount   int64
+}
+
+func (pw *Writer) WriteStreamResult(w io.Writer, schema *arrow.Schema, batches <-chan arrow.Record) (*WriteResult, error) {
+	cw := &countingWriter{w: w}
+	pqWriter, err := pqarrow.NewFileWriter(schema, cw, pw.props, pw.arrowProps)
+	if err != nil {
+		return nil, fmt.Errorf("create parquet writer: %w", err)
+	}
+	defer pqWriter.Close()
+
+	var totalRows int64
+	for batch := range batches {
+		if err := pqWriter.Write(batch); err != nil {
+			return nil, fmt.Errorf("write parquet batch: %w", err)
+		}
+		totalRows += int64(batch.NumRows())
+		batch.Release()
+	}
+	return &WriteResult{TotalBytes: cw.written, RowCount: totalRows}, nil
+}
+
+type countingWriter struct {
+	w       io.Writer
+	written int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.written += int64(n)
+	return n, err
+}
+
 func (pw *Writer) WriteStream(w io.Writer, schema *arrow.Schema, batches <-chan arrow.Record) error {
 	pqWriter, err := pqarrow.NewFileWriter(schema, w, pw.props, pw.arrowProps)
 	if err != nil {
