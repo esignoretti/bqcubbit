@@ -85,6 +85,23 @@ func (c *Config) Validate() error {
 	if c.Destination.Bucket == "" {
 		return fmt.Errorf("destination.bucket is required")
 	}
+	if c.Sync.IncrementalStrategy != "" &&
+		c.Sync.IncrementalStrategy != "full_refresh" &&
+		c.Sync.IncrementalStrategy != "partition" {
+		return fmt.Errorf("sync.incremental_strategy must be 'full_refresh' or 'partition', got %q", c.Sync.IncrementalStrategy)
+	}
+	if c.Scheduler.OverlapPolicy != "" &&
+		c.Scheduler.OverlapPolicy != "skip" &&
+		c.Scheduler.OverlapPolicy != "queue" &&
+		c.Scheduler.OverlapPolicy != "cancel_and_restart" {
+		return fmt.Errorf("scheduler.overlap_policy invalid: %q", c.Scheduler.OverlapPolicy)
+	}
+	if c.WorkerPool.MinWorkers < 1 {
+		return fmt.Errorf("worker_pool.min_workers must be >= 1")
+	}
+	if c.WorkerPool.MaxWorkers < c.WorkerPool.MinWorkers {
+		return fmt.Errorf("worker_pool.max_workers (%d) must be >= min_workers (%d)", c.WorkerPool.MaxWorkers, c.WorkerPool.MinWorkers)
+	}
 	return nil
 }
 
