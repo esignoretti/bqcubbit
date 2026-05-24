@@ -14,14 +14,14 @@ type Config struct {
 }
 
 type SourceConfig struct {
-	ProjectID string   `yaml:"project_id" validate:"required"`
-	Location  string   `yaml:"location" validate:"required"`
+	ProjectID string   `yaml:"project_id"`
+	Location  string   `yaml:"location"`
 	Datasets  []string `yaml:"datasets"`
 }
 
 type DestinationConfig struct {
-	Endpoint         string `yaml:"endpoint" validate:"required"`
-	Bucket           string `yaml:"bucket" validate:"required"`
+	Endpoint         string `yaml:"endpoint"`
+	Bucket           string `yaml:"bucket"`
 	Prefix           string `yaml:"prefix"`
 	AccessKey        string `yaml:"access_key"`
 	SecretKey        string `yaml:"secret_key"`
