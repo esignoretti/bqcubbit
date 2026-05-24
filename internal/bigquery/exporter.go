@@ -3,7 +3,6 @@ package bigquery
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 
 	"cloud.google.com/go/bigquery"
@@ -69,10 +68,6 @@ func (e *ExportDataBackend) transferFile(ctx context.Context, gcsPath, cubbitKey
 		return fmt.Errorf("open gcs reader: %w", err)
 	}
 	defer reader.Close()
-
-	if _, err := io.Copy(io.Discard, reader); err != nil {
-		return fmt.Errorf("read gcs object: %w", err)
-	}
 
 	if err := e.cubbitClient.UploadStream(ctx, cubbitKey, reader); err != nil {
 		return fmt.Errorf("upload to cubbit: %w", err)

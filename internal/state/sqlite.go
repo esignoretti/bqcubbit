@@ -166,35 +166,33 @@ func (s *SQLiteStore) CreateTasks(ctx context.Context, tasks []Task) error {
 }
 
 func (s *SQLiteStore) ClaimTask(ctx context.Context, workerID string) (*Task, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	row := tx.QueryRowContext(ctx,
-		"SELECT id, sync_run_id, table_id, schema_version, partition_id, shard_idx, state, lease_generation FROM tasks WHERE state='pending' ORDER BY created_at ASC LIMIT 1")
-	t := &Task{}
-	if err := row.Scan(&t.ID, &t.SyncRunID, &t.TableID, &t.SchemaVersion, &t.PartitionID, &t.ShardIdx, &t.State, &t.LeaseGeneration); err != nil {
-		return nil, err
-	}
-
+	// Use UPDATE ... WHERE ... LIMIT 1 as an atomic claim — no SELECT-then-UPDATE race.
+	// SQLite serializes writes, so this is safe without FOR UPDATE.
 	now := time.Now().UTC()
 	leaseExp := now.Add(30 * time.Minute)
-	_, err = tx.ExecContext(ctx,
-		"UPDATE tasks SET state='assigned', worker_id=?, lease_expires_at=?, lease_generation=lease_generation+1 WHERE id=? AND state='pending'",
-		workerID, leaseExp, t.ID)
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET state='assigned', worker_id=?, lease_expires_at=?, lease_generation=lease_generation+1
+		 WHERE id=(SELECT id FROM tasks WHERE state='pending' ORDER BY created_at ASC LIMIT 1) AND state='pending'`,
+		workerID, leaseExp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("claim task: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, fmt.Errorf("no pending tasks")
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	// Fetch the claimed task
+	row := s.db.QueryRowContext(ctx,
+		"SELECT id, sync_run_id, table_id, schema_version, partition_id, shard_idx, state, lease_generation FROM tasks WHERE worker_id=? AND state='assigned' ORDER BY lease_expires_at DESC LIMIT 1",
+		workerID)
+	t := &Task{}
+	if err := row.Scan(&t.ID, &t.SyncRunID, &t.TableID, &t.SchemaVersion, &t.PartitionID, &t.ShardIdx, &t.State, &t.LeaseGeneration); err != nil {
+		return nil, fmt.Errorf("fetch claimed task: %w", err)
 	}
-	t.State = "assigned"
 	t.WorkerID = &workerID
 	t.LeaseExpiresAt = &leaseExp
-	t.LeaseGeneration++
 	return t, nil
 }
 
@@ -372,9 +370,32 @@ func (s *SQLiteStore) GetDashboardSummary(ctx context.Context) ([]DashboardTable
 	return summaries, nil
 }
 
+func (s *SQLiteStore) GetTableByID(ctx context.Context, tableID int64) (*TableState, error) {
+	row := s.db.QueryRowContext(ctx,
+		"SELECT id, project, dataset, table_name, current_schema_version, last_sync_watermark, last_modified_time FROM tables WHERE id=?",
+		tableID)
+	ts := &TableState{}
+	var watermark, modified *time.Time
+	err := row.Scan(&ts.ID, &ts.Project, &ts.Dataset, &ts.TableName, &ts.SchemaVersion, &watermark, &modified)
+	if err != nil {
+		return nil, fmt.Errorf("get table by id: %w", err)
+	}
+	ts.LastSyncWatermark = watermark
+	ts.LastModifiedTime = modified
+	return ts, nil
+}
+
+func (s *SQLiteStore) UpdatePartitionSync(ctx context.Context, ps *PartitionState) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE partitions SET schema_version=?, bq_last_modified=?, last_successful_sync=?, row_count=?, bytes_in_cubbit=?
+		 WHERE id=?`,
+		ps.SchemaVersion, ps.BQLastModified, ps.LastSuccessfulSync, ps.RowCount, ps.BytesInCubbit, ps.ID)
+	return err
+}
+
 func (s *SQLiteStore) AcknowledgeSchemaChange(ctx context.Context, tableID int64, version int) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE tables SET state='active' WHERE id=?`, tableID)
+		`UPDATE tables SET state='active', current_schema_version=? WHERE id=?`, version, tableID)
 	return err
 }
 

@@ -189,7 +189,7 @@ func runServe(cfg *config.Config) error {
 		defer bqExport.Close()
 	}
 
-	executor := sync.NewTaskExecutor(cfg, bqReader, bqExport, storageClient, pqWriter, limiters)
+	executor := sync.NewTaskExecutor(cfg, bqReader, bqExport, storageClient, pqWriter, limiters, stateStore)
 	coord := coordinator.NewCoordinator(cfg, stateStore, limiters, executor)
 	sched := scheduler.NewScheduler(cfg, coord, stateStore)
 

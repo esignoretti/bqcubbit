@@ -96,5 +96,8 @@ type StateStore interface {
 	ListTasksByState(ctx context.Context, state string) ([]Task, error)
 	GetDashboardSummary(ctx context.Context) ([]DashboardTableSummary, error)
 	AcknowledgeSchemaChange(ctx context.Context, tableID int64, version int) error
+	GetTableByID(ctx context.Context, tableID int64) (*TableState, error)
+	UpdatePartitionSync(ctx context.Context, ps *PartitionState) error
+
 	Close() error
 }

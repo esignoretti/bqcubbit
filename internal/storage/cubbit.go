@@ -211,6 +211,18 @@ func (c *Client) AbortStaleUploads(ctx context.Context, maxAge time.Duration) er
 	return nil
 }
 
+func (c *Client) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	fullKey := c.prefix + "/" + key
+	resp, err := c.s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &c.bucket,
+		Key:    &fullKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get object %s: %w", fullKey, err)
+	}
+	return resp.Body, nil
+}
+
 func (c *Client) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
 	fullKey := c.prefix + "/" + key
 	_, err := c.s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
