@@ -3,14 +3,18 @@ package bigquery
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 
 	"cloud.google.com/go/bigquery/storage/apiv1"
 	"cloud.google.com/go/bigquery/storage/apiv1/storagepb"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type Reader interface {
@@ -37,12 +41,15 @@ func (r *StorageReadReader) Close() error {
 	return r.client.Close()
 }
 
+func tablePath(projectID, dataset, table string) string {
+	return fmt.Sprintf("projects/%s/datasets/%s/tables/%s", projectID, dataset, table)
+}
+
 func (r *StorageReadReader) Schema(ctx context.Context, projectID, dataset, table string) (*arrow.Schema, error) {
-	tablePath := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", projectID, dataset, table)
 	session, err := r.client.CreateReadSession(ctx, &storagepb.CreateReadSessionRequest{
 		Parent: fmt.Sprintf("projects/%s", projectID),
 		ReadSession: &storagepb.ReadSession{
-			Table:      tablePath,
+			Table:      tablePath(projectID, dataset, table),
 			DataFormat: storagepb.DataFormat_ARROW,
 		},
 		MaxStreamCount: 1,
@@ -52,23 +59,21 @@ func (r *StorageReadReader) Schema(ctx context.Context, projectID, dataset, tabl
 	}
 	arrowSchema := session.GetArrowSchema()
 	if arrowSchema == nil {
-		return nil, fmt.Errorf("no arrow schema returned")
+		return nil, errors.New("no arrow schema returned")
 	}
-	reader, err := ipc.NewReader(bytes.NewReader(arrowSchema.GetSerializedSchema()))
+	sr, err := ipc.NewReader(bytes.NewReader(arrowSchema.GetSerializedSchema()))
 	if err != nil {
 		return nil, fmt.Errorf("parse arrow schema: %w", err)
 	}
-	defer reader.Release()
-	return reader.Schema(), nil
+	defer sr.Release()
+	return sr.Schema(), nil
 }
 
 func (r *StorageReadReader) ReadTable(ctx context.Context, projectID, dataset, table string) (<-chan arrow.Record, error) {
-	tablePath := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", projectID, dataset, table)
-
 	session, err := r.client.CreateReadSession(ctx, &storagepb.CreateReadSessionRequest{
 		Parent: fmt.Sprintf("projects/%s", projectID),
 		ReadSession: &storagepb.ReadSession{
-			Table:      tablePath,
+			Table:      tablePath(projectID, dataset, table),
 			DataFormat: storagepb.DataFormat_ARROW,
 		},
 		MaxStreamCount: 1,
@@ -78,7 +83,7 @@ func (r *StorageReadReader) ReadTable(ctx context.Context, projectID, dataset, t
 	}
 
 	if len(session.Streams) == 0 {
-		return nil, fmt.Errorf("no streams returned")
+		return nil, errors.New("no streams returned")
 	}
 
 	schemaBytes := session.GetArrowSchema().GetSerializedSchema()
@@ -91,12 +96,23 @@ func (r *StorageReadReader) ReadTable(ctx context.Context, projectID, dataset, t
 			ReadStream: stream.Name,
 		})
 		if err != nil {
+			log.Printf("[bigquery] read rows stream: %v", err)
 			return
 		}
 
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			resp, err := readStream.Recv()
 			if err != nil {
+				if isStreamDone(err) {
+					return
+				}
+				log.Printf("[bigquery] recv error: %v", err)
 				return
 			}
 
@@ -109,17 +125,28 @@ func (r *StorageReadReader) ReadTable(ctx context.Context, projectID, dataset, t
 				bytes.NewReader(schemaBytes),
 				bytes.NewReader(batch.GetSerializedRecordBatch()),
 			)
-			reader, err := ipc.NewReader(combined)
+			ar, err := ipc.NewReader(combined)
 			if err != nil {
+				log.Printf("[bigquery] ipc reader error: %v", err)
 				return
 			}
-			for reader.Next() {
-				rec := reader.Record()
+			for ar.Next() {
+				rec := ar.Record()
 				rec.Retain()
-				out <- rec
+				select {
+				case out <- rec:
+				case <-ctx.Done():
+					rec.Release()
+					return
+				}
 			}
-			reader.Release()
+			ar.Release()
 		}
 	}()
 	return out, nil
+}
+
+func isStreamDone(err error) bool {
+	return errors.Is(err, io.EOF) || status.Code(err) == codes.OutOfRange ||
+		errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled
 }
