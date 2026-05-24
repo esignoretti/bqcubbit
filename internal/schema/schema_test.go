@@ -300,3 +300,114 @@ func TestBQFieldModeDefaultsNullable(t *testing.T) {
 		t.Fatalf("expected ADDITIVE when mode is empty (defaults to NULLABLE), got %s", diff.ChangeType)
 	}
 }
+
+func TestClassifyChangeAddNullableAdditive(t *testing.T) {
+	changes := []FieldChange{
+		{Type: FieldADD, Path: "email", After: &BQField{Name: "email", Type: "STRING", Mode: "NULLABLE"}},
+	}
+	ct := ClassifyChange(changes)
+	if ct != ADDITIVE {
+		t.Fatalf("expected ADDITIVE, got %s", ct)
+	}
+}
+
+func TestClassifyChangeRequiredAddBreaking(t *testing.T) {
+	changes := []FieldChange{
+		{Type: FieldADD, Path: "email", After: &BQField{Name: "email", Type: "STRING", Mode: "REQUIRED"}},
+	}
+	ct := ClassifyChange(changes)
+	if ct != BREAKING {
+		t.Fatalf("expected BREAKING, got %s", ct)
+	}
+}
+
+func TestClassifyChangeDropBreaking(t *testing.T) {
+	changes := []FieldChange{
+		{Type: FieldDROP, Path: "name", Before: &BQField{Name: "name", Type: "STRING", Mode: "NULLABLE"}},
+	}
+	ct := ClassifyChange(changes)
+	if ct != BREAKING {
+		t.Fatalf("expected BREAKING, got %s", ct)
+	}
+}
+
+func TestIsTypeWideningInt64ToFloat64(t *testing.T) {
+	before := &BQField{Name: "val", Type: "INT64"}
+	after := &BQField{Name: "val", Type: "FLOAT64"}
+	if !isTypeWidening(before, after) {
+		t.Fatal("expected INT64->FLOAT64 to be widening")
+	}
+}
+
+func TestIsTypeWideningInt64ToString(t *testing.T) {
+	before := &BQField{Name: "val", Type: "INT64"}
+	after := &BQField{Name: "val", Type: "STRING"}
+	if isTypeWidening(before, after) {
+		t.Fatal("expected INT64->STRING to not be widening")
+	}
+}
+
+func TestDiffTypeWideningAdditive(t *testing.T) {
+	oldFields := []BQField{
+		{Name: "val", Type: "INT64", Mode: "NULLABLE"},
+	}
+	newFields := []BQField{
+		{Name: "val", Type: "FLOAT64", Mode: "NULLABLE"},
+	}
+	diff := Diff(oldFields, newFields)
+	if diff.ChangeType != ADDITIVE {
+		t.Fatalf("expected ADDITIVE for INT64->FLOAT64, got %s", diff.ChangeType)
+	}
+}
+
+func TestIsTypeWideningNumericToBigNumeric(t *testing.T) {
+	before := &BQField{Name: "val", Type: "NUMERIC"}
+	after := &BQField{Name: "val", Type: "BIGNUMERIC"}
+	if !isTypeWidening(before, after) {
+		t.Fatal("expected NUMERIC->BIGNUMERIC to be widening")
+	}
+}
+
+func TestIsTypeWideningDateToTimestamp(t *testing.T) {
+	before := &BQField{Name: "val", Type: "DATE"}
+	after := &BQField{Name: "val", Type: "TIMESTAMP"}
+	if !isTypeWidening(before, after) {
+		t.Fatal("expected DATE->TIMESTAMP to be widening")
+	}
+}
+
+func TestIsTypeWideningDatetimeToTimestamp(t *testing.T) {
+	before := &BQField{Name: "val", Type: "DATETIME"}
+	after := &BQField{Name: "val", Type: "TIMESTAMP"}
+	if !isTypeWidening(before, after) {
+		t.Fatal("expected DATETIME->TIMESTAMP to be widening")
+	}
+}
+
+func TestIsTypeWideningStringToInt64(t *testing.T) {
+	before := &BQField{Name: "val", Type: "STRING"}
+	after := &BQField{Name: "val", Type: "INT64"}
+	if isTypeWidening(before, after) {
+		t.Fatal("expected STRING->INT64 to not be widening")
+	}
+}
+
+func TestClassifyChangeTypeWideningAdditive(t *testing.T) {
+	changes := []FieldChange{
+		{Type: FieldTypeChange, Path: "val", Before: &BQField{Name: "val", Type: "INT64"}, After: &BQField{Name: "val", Type: "FLOAT64"}},
+	}
+	ct := ClassifyChange(changes)
+	if ct != ADDITIVE {
+		t.Fatalf("expected ADDITIVE for INT64->FLOAT64, got %s", ct)
+	}
+}
+
+func TestClassifyChangeTypeWideningNonWideningBreaking(t *testing.T) {
+	changes := []FieldChange{
+		{Type: FieldTypeChange, Path: "val", Before: &BQField{Name: "val", Type: "INT64"}, After: &BQField{Name: "val", Type: "STRING"}},
+	}
+	ct := ClassifyChange(changes)
+	if ct != BREAKING {
+		t.Fatalf("expected BREAKING for INT64->STRING, got %s", ct)
+	}
+}

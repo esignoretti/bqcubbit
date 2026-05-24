@@ -194,6 +194,30 @@ func diffFields(oldFields, newFields []BQField, prefix string) []FieldChange {
 	return changes
 }
 
+func ClassifyChange(changes []FieldChange) ChangeType {
+	return classifyChanges(changes)
+}
+
+func isTypeWidening(before, after *BQField) bool {
+	widening := map[string][]string{
+		"INT64":    {"FLOAT64", "NUMERIC", "BIGNUMERIC"},
+		"FLOAT64":  {"NUMERIC", "BIGNUMERIC"},
+		"NUMERIC":  {"BIGNUMERIC"},
+		"DATE":     {"DATETIME", "TIMESTAMP"},
+		"DATETIME": {"TIMESTAMP"},
+	}
+	valid, ok := widening[before.Type]
+	if !ok {
+		return false
+	}
+	for _, v := range valid {
+		if after.Type == v {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyChanges(changes []FieldChange) ChangeType {
 	if len(changes) == 0 {
 		return NONE
@@ -203,6 +227,9 @@ func classifyChanges(changes []FieldChange) ChangeType {
 		case FieldDROP:
 			return BREAKING
 		case FieldTypeChange:
+			if c.Before != nil && c.After != nil && isTypeWidening(c.Before, c.After) {
+				continue
+			}
 			return BREAKING
 		case FieldADD:
 			if c.After == nil {
