@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/esignoretti/bqcubbit/internal/bigquery"
 	"github.com/esignoretti/bqcubbit/internal/config"
@@ -90,6 +91,12 @@ func runSync(cfg *config.Config) error {
 		pqWriterCfg.CompressionLevel = cfg.Destination.CompressionLevel
 	}
 	pqWriter := pq.NewWriter(pqWriterCfg)
+
+	go func() {
+		if err := storageClient.AbortStaleUploads(context.Background(), 24*time.Hour); err != nil {
+			log.Printf("[main] warning: cleanup stale uploads: %v", err)
+		}
+	}()
 
 	orch := sync.NewOrchestrator(cfg, bqReader, storageClient, store, pqWriter)
 

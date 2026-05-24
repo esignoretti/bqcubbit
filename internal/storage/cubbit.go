@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -179,6 +181,34 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]string, erro
 	}
 
 	return keys, nil
+}
+
+func (c *Client) AbortStaleUploads(ctx context.Context, maxAge time.Duration) error {
+	paginator := s3.NewListMultipartUploadsPaginator(c.s3Client, &s3.ListMultipartUploadsInput{
+		Bucket: &c.bucket,
+	})
+	now := time.Now()
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list multipart uploads: %w", err)
+		}
+		for _, upload := range page.Uploads {
+			if upload.Initiated != nil && now.Sub(*upload.Initiated) > maxAge {
+				_, err := c.s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+					Bucket:   &c.bucket,
+					Key:      upload.Key,
+					UploadId: upload.UploadId,
+				})
+				if err != nil {
+					log.Printf("[storage] warning: abort stale upload %s: %v", *upload.Key, err)
+				} else {
+					log.Printf("[storage] aborted stale multipart upload: %s", *upload.Key)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Client) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
