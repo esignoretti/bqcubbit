@@ -66,6 +66,16 @@ type PartitionState struct {
 	BytesInCubbit      int64
 }
 
+type DashboardTableSummary struct {
+	Dataset        string
+	TableName      string
+	SchemaVersion  int
+	LastSyncTime   *time.Time
+	PartitionCount int
+	TotalRows      int64
+	TotalBytes     int64
+}
+
 type StateStore interface {
 	Init(ctx context.Context) error
 	BeginRun(ctx context.Context) (*SyncRun, error)
@@ -84,5 +94,7 @@ type StateStore interface {
 	AcquireJobLock(ctx context.Context, lockName string, ttl time.Duration) (bool, error)
 	ReleaseJobLock(ctx context.Context, lockName string) error
 	ListTasksByState(ctx context.Context, state string) ([]Task, error)
+	GetDashboardSummary(ctx context.Context) ([]DashboardTableSummary, error)
+	AcknowledgeSchemaChange(ctx context.Context, tableID int64, version int) error
 	Close() error
 }

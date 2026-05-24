@@ -344,6 +344,40 @@ func (s *SQLiteStore) ListTasksByState(ctx context.Context, state string) ([]Tas
 	return tasks, nil
 }
 
+func (s *SQLiteStore) GetDashboardSummary(ctx context.Context) ([]DashboardTableSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.dataset, t.table_name, t.current_schema_version, t.last_sync_watermark,
+			   COUNT(p.id) as partition_count,
+			   COALESCE(SUM(p.row_count), 0) as total_rows,
+			   COALESCE(SUM(p.bytes_in_cubbit), 0) as total_bytes
+		FROM tables t
+		LEFT JOIN partitions p ON p.table_id = t.id
+		GROUP BY t.id
+		ORDER BY t.dataset, t.table_name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []DashboardTableSummary
+	for rows.Next() {
+		s := DashboardTableSummary{}
+		if err := rows.Scan(&s.Dataset, &s.TableName, &s.SchemaVersion, &s.LastSyncTime,
+			&s.PartitionCount, &s.TotalRows, &s.TotalBytes); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, s)
+	}
+	return summaries, nil
+}
+
+func (s *SQLiteStore) AcknowledgeSchemaChange(ctx context.Context, tableID int64, version int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tables SET state='active' WHERE id=?`, tableID)
+	return err
+}
+
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
