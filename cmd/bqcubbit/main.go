@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/esignoretti/bqcubbit/internal/bigquery"
 	"github.com/esignoretti/bqcubbit/internal/config"
+	"github.com/esignoretti/bqcubbit/internal/coordinator"
 	pq "github.com/esignoretti/bqcubbit/internal/parquet"
+	"github.com/esignoretti/bqcubbit/internal/rate"
+	"github.com/esignoretti/bqcubbit/internal/scheduler"
 	"github.com/esignoretti/bqcubbit/internal/state"
 	"github.com/esignoretti/bqcubbit/internal/storage"
 	"github.com/esignoretti/bqcubbit/internal/sync"
@@ -20,7 +25,7 @@ import (
 func main() {
 	log.SetFlags(0)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: bqcubbit [flags] <command>\n\nCommands:\n  sync   Export a table from BigQuery to Cubbit DS3\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: bqcubbit [flags] <command>\n\nCommands:\n  sync   Export a table from BigQuery to Cubbit DS3\n  serve  Run as daemon with scheduler and WebUI\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 
@@ -41,6 +46,10 @@ func main() {
 	case "sync":
 		if err := runSync(cfg); err != nil {
 			log.Fatalf("sync: %v", err)
+		}
+	case "serve":
+		if err := runServe(cfg); err != nil {
+			log.Fatalf("serve: %v", err)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", flag.Arg(0))
@@ -110,4 +119,77 @@ func runSync(cfg *config.Config) error {
 	}
 
 	return orch.SyncAll(context.Background())
+}
+
+func runServe(cfg *config.Config) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		log.Println("[serve] received shutdown signal")
+		cancel()
+	}()
+
+	bqReader, err := bigquery.NewStorageReadReader(ctx, cfg.Source.ProjectID, cfg.Source.Location)
+	if err != nil {
+		return fmt.Errorf("create bq reader: %w", err)
+	}
+	defer bqReader.Close()
+
+	storageClient, err := storage.NewClient(ctx, cfg.Destination.Endpoint, cfg.Destination.AccessKey, cfg.Destination.SecretKey, cfg.Destination.Bucket, cfg.Destination.Prefix)
+	if err != nil {
+		return fmt.Errorf("create storage: %w", err)
+	}
+
+	statePath := os.Getenv("BQCUBBIT_STATE")
+	if statePath == "" {
+		statePath = "bqcubbit_state.db"
+	}
+	stateStore, err := state.NewSQLiteStore(statePath)
+	if err != nil {
+		return fmt.Errorf("create state: %w", err)
+	}
+	defer stateStore.Close()
+	stateStore.Init(ctx)
+
+	pqWriter := pq.NewWriter(pq.DefaultWriterConfig())
+
+	limiters := rate.NewLimiters(
+		cfg.RateLimit.BQReadSessionsPerHour,
+		cfg.RateLimit.BQExportJobsPerHour,
+		cfg.RateLimit.CubbitUploadsPerMin,
+	)
+
+	var bqExport *bigquery.ExportDataBackend
+	if cfg.GCS.StagingBucket != "" {
+		bqExport, err = bigquery.NewExportDataBackend(ctx, cfg.Source.ProjectID, cfg.Source.Location, cfg.GCS.StagingBucket, cfg.GCS.StagingPrefix, storageClient)
+		if err != nil {
+			return fmt.Errorf("create export backend: %w", err)
+		}
+		defer bqExport.Close()
+	}
+
+	executor := sync.NewTaskExecutor(cfg, bqReader, bqExport, storageClient, pqWriter, limiters)
+	coord := coordinator.NewCoordinator(cfg, stateStore, limiters, executor)
+	sched := scheduler.NewScheduler(cfg, coord, stateStore)
+
+	go func() {
+		if err := storageClient.AbortStaleUploads(ctx, 24*time.Hour); err != nil {
+			log.Printf("[serve] warning: cleanup stale uploads: %v", err)
+		}
+	}()
+
+	log.Printf("[serve] bqcubbit daemon starting (cron: %s)", cfg.Scheduler.Cron)
+
+	if cfg.Scheduler.InitialSyncMode == "full_refresh" {
+		log.Println("[serve] running initial sync")
+		if _, err := coord.RunOnce(ctx); err != nil {
+			log.Printf("[serve] initial sync failed: %v", err)
+		}
+	}
+
+	return sched.Start(ctx)
 }
