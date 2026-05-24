@@ -13,6 +13,22 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
+func TestUploadMultipart(t *testing.T) {
+	t.Skip("requires real Cubbit DS3 credentials")
+	client, err := NewClient(context.Background(), "https://s3.cubbit.eu", "ak", "sk", "test-bucket", "test-prefix/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader("test data for multipart upload")
+	etag, err := client.UploadMultipart(context.Background(), "multipart-test.txt", body)
+	if err != nil {
+		t.Fatalf("UploadMultipart failed: %v", err)
+	}
+	if etag == "" {
+		t.Fatal("expected non-empty ETag")
+	}
+}
+
 func TestUploadStream(t *testing.T) {
 	t.Skip("requires real Cubbit DS3 credentials")
 	client, err := NewClient(context.Background(), "https://s3.cubbit.eu", "ak", "sk", "test-bucket", "test-prefix/")

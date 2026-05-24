@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,7 +11,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
+
+const uploadPartSize = 16 * 1024 * 1024
 
 type Client struct {
 	s3Client *s3.Client
@@ -67,4 +71,122 @@ func (c *Client) ObjectExists(ctx context.Context, key string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+func (c *Client) UploadMultipart(ctx context.Context, key string, body io.Reader) (string, error) {
+	fullKey := c.prefix + "/" + key
+
+	createResp, err := c.s3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: &c.bucket,
+		Key:    &fullKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create multipart upload: %w", err)
+	}
+	uploadID := *createResp.UploadId
+
+	var parts []types.CompletedPart
+	buf := make([]byte, uploadPartSize)
+	var partNumber int32 = 0
+
+	for {
+		n, readErr := io.ReadFull(body, buf)
+		if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+			c.AbortMultipartUpload(ctx, key, uploadID)
+			return "", fmt.Errorf("read body: %w", readErr)
+		}
+		if n == 0 {
+			break
+		}
+		partNumber++
+
+		uploadResp, err := c.s3Client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket:     &c.bucket,
+			Key:        &fullKey,
+			PartNumber: &partNumber,
+			UploadId:   &uploadID,
+			Body:       bytes.NewReader(buf[:n]),
+		})
+		if err != nil {
+			c.AbortMultipartUpload(ctx, key, uploadID)
+			return "", fmt.Errorf("upload part %d: %w", partNumber, err)
+		}
+
+		parts = append(parts, types.CompletedPart{
+			ETag:       uploadResp.ETag,
+			PartNumber: &partNumber,
+		})
+	}
+
+	completeResp, err := c.s3Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket: &c.bucket,
+		Key:    &fullKey,
+		UploadId: &uploadID,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: parts,
+		},
+	})
+	if err != nil {
+		c.AbortMultipartUpload(ctx, key, uploadID)
+		return "", fmt.Errorf("complete multipart upload: %w", err)
+	}
+
+	etag := *completeResp.ETag
+	return etag, nil
+}
+
+func (c *Client) RenameObject(ctx context.Context, oldKey, newKey string) error {
+	oldFull := c.prefix + "/" + oldKey
+	newFull := c.prefix + "/" + newKey
+
+	_, err := c.s3Client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     &c.bucket,
+		CopySource: aws.String(c.bucket + "/" + oldFull),
+		Key:        &newFull,
+	})
+	if err != nil {
+		return fmt.Errorf("copy object: %w", err)
+	}
+
+	_, err = c.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &c.bucket,
+		Key:    &oldFull,
+	})
+	if err != nil {
+		return fmt.Errorf("delete old object: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Client) ListObjects(ctx context.Context, prefix string) ([]string, error) {
+	fullPrefix := c.prefix + "/" + prefix
+	var keys []string
+
+	paginator := s3.NewListObjectsV2Paginator(c.s3Client, &s3.ListObjectsV2Input{
+		Bucket: &c.bucket,
+		Prefix: &fullPrefix,
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects: %w", err)
+		}
+		for _, obj := range page.Contents {
+			keys = append(keys, *obj.Key)
+		}
+	}
+
+	return keys, nil
+}
+
+func (c *Client) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
+	fullKey := c.prefix + "/" + key
+	_, err := c.s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   &c.bucket,
+		Key:      &fullKey,
+		UploadId: &uploadID,
+	})
+	return err
 }
