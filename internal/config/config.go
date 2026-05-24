@@ -11,6 +11,10 @@ type Config struct {
 	Source      SourceConfig      `yaml:"source"`
 	Destination DestinationConfig `yaml:"destination"`
 	Sync        SyncConfig        `yaml:"sync"`
+	Scheduler   SchedulerConfig   `yaml:"scheduler"`
+	WorkerPool  WorkerPoolConfig  `yaml:"worker_pool"`
+	RateLimit   RateLimitConfig   `yaml:"rate_limit"`
+	GCS         GCSConfig         `yaml:"gcs"`
 }
 
 type SourceConfig struct {
@@ -34,12 +38,38 @@ type TableSyncConfig struct {
 	IncrementalStrategy string `yaml:"incremental_strategy"`
 }
 
+type SchedulerConfig struct {
+	Cron            string `yaml:"cron"`
+	OverlapPolicy   string `yaml:"overlap_policy"`
+	InitialSyncMode string `yaml:"initial_sync_mode"`
+}
+
+type WorkerPoolConfig struct {
+	MinWorkers int `yaml:"min_workers"`
+	MaxWorkers int `yaml:"max_workers"`
+	QueueDepth int `yaml:"queue_depth"`
+}
+
+type RateLimitConfig struct {
+	BQReadSessionsPerHour int `yaml:"bq_read_sessions_per_hour"`
+	BQExportJobsPerHour   int `yaml:"bq_export_jobs_per_hour"`
+	CubbitUploadsPerMin   int `yaml:"cubbit_uploads_per_minute"`
+}
+
+type GCSConfig struct {
+	StagingBucket string `yaml:"staging_bucket"`
+	StagingPrefix string `yaml:"staging_prefix"`
+	LifecycleDays int    `yaml:"lifecycle_days"`
+}
+
 type SyncConfig struct {
 	Table               string            `yaml:"table"`
 	Datasets            []string          `yaml:"datasets"`
 	IncrementalStrategy string            `yaml:"incremental_strategy"`
 	Tables              []TableSyncConfig `yaml:"tables"`
 	MaxConcurrent       int               `yaml:"max_concurrent"`
+	ExtractionMethod    string            `yaml:"extraction_method"`
+	MaxPartitionSizeGB  int               `yaml:"max_partition_size_gb"`
 }
 
 func (c *Config) Validate() error {
@@ -68,6 +98,27 @@ func Default() *Config {
 		Sync: SyncConfig{
 			IncrementalStrategy: "full_refresh",
 			MaxConcurrent:       1,
+			ExtractionMethod:    "auto",
+			MaxPartitionSizeGB:  5,
+		},
+		Scheduler: SchedulerConfig{
+			Cron:            "0 2 * * *",
+			OverlapPolicy:   "skip",
+			InitialSyncMode: "full_refresh",
+		},
+		WorkerPool: WorkerPoolConfig{
+			MinWorkers: 2,
+			MaxWorkers: 8,
+			QueueDepth: 10,
+		},
+		RateLimit: RateLimitConfig{
+			BQReadSessionsPerHour: 100,
+			BQExportJobsPerHour:   50,
+			CubbitUploadsPerMin:   60,
+		},
+		GCS: GCSConfig{
+			StagingPrefix: "_bqcubbit_staging/",
+			LifecycleDays: 1,
 		},
 	}
 }
