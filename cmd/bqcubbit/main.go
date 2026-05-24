@@ -100,11 +100,14 @@ func runSync(cfg *config.Config) error {
 
 	orch := sync.NewOrchestrator(cfg, bqReader, storageClient, store, pqWriter)
 
-	parts := strings.SplitN(cfg.Sync.Table, ".", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid table format %q: expected dataset.table", cfg.Sync.Table)
+	if cfg.Sync.Table != "" {
+		parts := strings.SplitN(cfg.Sync.Table, ".", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid table format %q: expected dataset.table", cfg.Sync.Table)
+		}
+		dataset, table := parts[0], parts[1]
+		return orch.SyncTable(context.Background(), dataset, table)
 	}
-	dataset, table := parts[0], parts[1]
 
-	return orch.SyncTable(context.Background(), dataset, table)
+	return orch.SyncAll(context.Background())
 }
