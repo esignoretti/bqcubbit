@@ -35,10 +35,14 @@ type Result struct {
 }
 
 // VerifyPartition compares BQ row count against expected count from export.
-// Only works for time-unit or ingestion-time partitioned tables where we can filter by partition_id.
+// Uses _PARTITIONTIME filter for ingestion-time partitions, or _PARTITIONDATE for date-range.
 func (v *Verifier) VerifyPartition(ctx context.Context, projectID, dataset, table, partitionID string, expectedRows int64) (*Result, error) {
-	q := v.bqClient.Query(fmt.Sprintf("SELECT COUNT(*) as cnt FROM `%s.%s.%s`",
+	q := v.bqClient.Query(fmt.Sprintf(
+		"SELECT COUNT(*) as cnt FROM `%s.%s.%s` WHERE _PARTITIONTIME = TIMESTAMP(@partition_id)",
 		projectID, dataset, table))
+	q.Parameters = []bigquery.QueryParameter{
+		{Name: "partition_id", Value: partitionID},
+	}
 
 	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

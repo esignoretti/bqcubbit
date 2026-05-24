@@ -208,7 +208,7 @@ func runServe(cfg *config.Config) error {
 		}
 	}
 
-	webHandler, err := webui.NewHandler()
+	webHandler, err := webui.NewHandler(stateStore)
 	if err != nil {
 		return fmt.Errorf("create webui: %w", err)
 	}

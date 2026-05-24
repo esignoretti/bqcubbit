@@ -47,23 +47,35 @@ func NewTaskExecutor(
 func (e *TaskExecutor) ExecuteTask(ctx context.Context, taskID string) error {
 	log.Printf("[executor] executing task %s", taskID)
 
-	task, tableRef, err := e.resolveTask(ctx, taskID)
+	task, err := e.resolveTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("resolve task %s: %w", taskID, err)
 	}
 
-	arrowSchema, err := e.bqReader.Schema(ctx, e.cfg.Source.ProjectID, tableRef.dataset, tableRef.table)
+	tableState, err := e.stateStore.GetTableByID(ctx, task.TableID)
+	if err != nil {
+		return fmt.Errorf("get table %d: %w", task.TableID, err)
+	}
+
+	dataset, tableName := tableState.Dataset, tableState.TableName
+
+	arrowSchema, err := e.bqReader.Schema(ctx, e.cfg.Source.ProjectID, dataset, tableName)
 	if err != nil {
 		return fmt.Errorf("fetch schema: %w", err)
 	}
 
-	batches, err := e.bqReader.ReadTable(ctx, e.cfg.Source.ProjectID, tableRef.dataset, tableRef.table)
+	batches, err := e.bqReader.ReadTable(ctx, e.cfg.Source.ProjectID, dataset, tableName)
 	if err != nil {
 		return fmt.Errorf("read table: %w", err)
 	}
 
+	schemaVersion := tableState.SchemaVersion
+	if schemaVersion < 1 {
+		schemaVersion = 1
+	}
+
 	stagingKey := fmt.Sprintf("_staging/%s/%s/%s/part-%05d.zstd.parquet",
-		tableRef.table, task.PartitionID, time.Now().UTC().Format("150405"),
+		tableName, task.PartitionID, time.Now().UTC().Format("150405"),
 		time.Now().UnixMilli()%100000)
 
 	pipeReader, pipeWriter := io.Pipe()
@@ -82,6 +94,10 @@ func (e *TaskExecutor) ExecuteTask(ctx context.Context, taskID string) error {
 		_ = result
 	}()
 
+	if err := e.limiters.WaitUpload(ctx); err != nil {
+		return err
+	}
+
 	_, err = e.storage.UploadMultipart(ctx, stagingKey, hashReader)
 	if err != nil {
 		e.stateStore.UpdateTaskState(ctx, task.ID, "failed", task.LeaseGeneration)
@@ -93,10 +109,8 @@ func (e *TaskExecutor) ExecuteTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("parquet write: %w", err)
 	}
 
-	// TODO: use actual schemaVersion from state store
-	schemaVersion := 1
 	finalKey := fmt.Sprintf("%s/%s/schema_version=v%d/%s/part-%05d.zstd.parquet",
-		tableRef.dataset, tableRef.table, schemaVersion, task.PartitionID,
+		dataset, tableName, schemaVersion, task.PartitionID,
 		time.Now().UnixMilli()%100000)
 
 	if err := e.storage.RenameObject(ctx, stagingKey, finalKey); err != nil {
@@ -104,8 +118,7 @@ func (e *TaskExecutor) ExecuteTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("rename staging->final: %w", err)
 	}
 
-	// Merge manifest
-	if err := e.updateManifest(ctx, tableRef.dataset, tableRef.table, finalKey, hashReader.TotalBytes(), hashReader.SHA256()); err != nil {
+	if err := e.updateManifest(ctx, dataset, tableName, finalKey, hashReader.TotalBytes(), hashReader.SHA256()); err != nil {
 		log.Printf("[executor] warning: update manifest: %v", err)
 	}
 
@@ -117,22 +130,17 @@ func (e *TaskExecutor) ExecuteTask(ctx context.Context, taskID string) error {
 	return nil
 }
 
-type tableRef struct {
-	dataset string
-	table   string
-}
-
-func (e *TaskExecutor) resolveTask(ctx context.Context, taskID string) (*state.Task, *tableRef, error) {
+func (e *TaskExecutor) resolveTask(ctx context.Context, taskID string) (*state.Task, error) {
 	tasks, err := e.stateStore.ListTasksByState(ctx, "assigned")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for _, t := range tasks {
 		if t.ID == taskID {
-			return &t, &tableRef{dataset: "unknown", table: "unknown"}, nil
+			return &t, nil
 		}
 	}
-	return nil, nil, fmt.Errorf("task %s not found", taskID)
+	return nil, fmt.Errorf("task %s not found in assigned tasks", taskID)
 }
 
 func (e *TaskExecutor) updateManifest(ctx context.Context, dataset, table, filePath string, fileSize int64, sha256 string) error {
