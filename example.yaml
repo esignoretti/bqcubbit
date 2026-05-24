@@ -1,0 +1,17 @@
+source:
+  project_id: my-gcp-project
+  location: EU
+  datasets:
+    - analytics
+
+destination:
+  endpoint: https://s3.cubbit.eu
+  bucket: my-bigquery-export
+  prefix: bq-export/
+  access_key: YOUR_DS3_ACCESS_KEY
+  secret_key: YOUR_DS3_SECRET_KEY
+  compression: zstd
+  compression_level: 9
+
+sync:
+  table: analytics.events
