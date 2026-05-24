@@ -78,5 +78,11 @@ type StateStore interface {
 	RecordSchemaVersion(ctx context.Context, sv *SchemaVersion) error
 	GetCurrentSchemaVersion(ctx context.Context, tableID int64) (*SchemaVersion, error)
 	GetOrCreatePartition(ctx context.Context, tableID int64, partitionID string) (*PartitionState, error)
+	RenewLease(ctx context.Context, taskID string, generation int) (bool, error)
+	ListExpiredLeases(ctx context.Context) ([]Task, error)
+	ResetExpiredLeases(ctx context.Context) (int, error)
+	AcquireJobLock(ctx context.Context, lockName string, ttl time.Duration) (bool, error)
+	ReleaseJobLock(ctx context.Context, lockName string) error
+	ListTasksByState(ctx context.Context, state string) ([]Task, error)
 	Close() error
 }

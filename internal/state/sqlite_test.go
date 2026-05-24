@@ -105,4 +105,33 @@ func TestSQLiteStore(t *testing.T) {
 	if ps2.ID != ps.ID {
 		t.Fatalf("expected same partition id %d, got %d", ps.ID, ps2.ID)
 	}
+
+	// --- Job lock tests ---
+	acquired, err := store.AcquireJobLock(ctx, "test-lock", 10*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireJobLock first: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected first acquire to return true")
+	}
+
+	acquired, err = store.AcquireJobLock(ctx, "test-lock", 10*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireJobLock second: %v", err)
+	}
+	if acquired {
+		t.Fatal("expected second acquire (same lock) to return false")
+	}
+
+	if err := store.ReleaseJobLock(ctx, "test-lock"); err != nil {
+		t.Fatalf("ReleaseJobLock: %v", err)
+	}
+
+	acquired, err = store.AcquireJobLock(ctx, "test-lock", 10*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireJobLock after release: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected acquire after release to return true")
+	}
 }

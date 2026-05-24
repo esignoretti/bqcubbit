@@ -259,6 +259,91 @@ func (s *SQLiteStore) GetOrCreatePartition(ctx context.Context, tableID int64, p
 	return ps, nil
 }
 
+func (s *SQLiteStore) RenewLease(ctx context.Context, taskID string, generation int) (bool, error) {
+	now := time.Now().UTC()
+	leaseExp := now.Add(30 * time.Minute)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET lease_expires_at=?, lease_generation=lease_generation+1 WHERE id=? AND lease_generation=?`,
+		leaseExp, taskID, generation)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (s *SQLiteStore) ListExpiredLeases(ctx context.Context) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, sync_run_id, table_id, schema_version, partition_id, shard_idx, state, lease_generation
+		 FROM tasks WHERE state='assigned' AND lease_expires_at < datetime('now')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []Task
+	for rows.Next() {
+		t := Task{}
+		rows.Scan(&t.ID, &t.SyncRunID, &t.TableID, &t.SchemaVersion, &t.PartitionID, &t.ShardIdx, &t.State, &t.LeaseGeneration)
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
+func (s *SQLiteStore) ResetExpiredLeases(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET state='pending', worker_id=NULL, lease_expires_at=NULL
+		 WHERE state='assigned' AND lease_expires_at < datetime('now')`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func (s *SQLiteStore) AcquireJobLock(ctx context.Context, lockName string, ttl time.Duration) (bool, error) {
+	s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS job_locks (
+		lock_name TEXT PRIMARY KEY,
+		acquired_at TIMESTAMP NOT NULL,
+		ttl_seconds INTEGER NOT NULL
+	)`)
+	now := time.Now().UTC()
+
+	s.db.ExecContext(ctx,
+		`DELETE FROM job_locks WHERE lock_name=? AND datetime(acquired_at, '+' || ttl_seconds || ' seconds') < datetime(?)`,
+		lockName, now)
+
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO job_locks (lock_name, acquired_at, ttl_seconds) VALUES (?, ?, ?)`,
+		lockName, now, int(ttl.Seconds()))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (s *SQLiteStore) ReleaseJobLock(ctx context.Context, lockName string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM job_locks WHERE lock_name=?`, lockName)
+	return err
+}
+
+func (s *SQLiteStore) ListTasksByState(ctx context.Context, state string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, sync_run_id, table_id, schema_version, partition_id, shard_idx, state, lease_generation
+		 FROM tasks WHERE state=?`, state)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []Task
+	for rows.Next() {
+		t := Task{}
+		rows.Scan(&t.ID, &t.SyncRunID, &t.TableID, &t.SchemaVersion, &t.PartitionID, &t.ShardIdx, &t.State, &t.LeaseGeneration)
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
