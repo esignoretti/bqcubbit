@@ -45,6 +45,22 @@ func (m *TableManifest) AddFile(path string, size, rowCount int64, sha256 string
 	m.BytesInCubbit += size
 }
 
+// Merge combines another manifest into this one, deduplicating by file path.
+func (m *TableManifest) Merge(other *TableManifest) {
+	paths := make(map[string]bool)
+	for _, f := range m.Files {
+		paths[f.Path] = true
+	}
+	for _, f := range other.Files {
+		if !paths[f.Path] {
+			m.Files = append(m.Files, f)
+			m.RowCount += f.RowCount
+			m.BytesInCubbit += f.Size
+			paths[f.Path] = true
+		}
+	}
+}
+
 func (m *TableManifest) Serialize() ([]byte, error) {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
