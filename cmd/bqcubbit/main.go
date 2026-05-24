@@ -11,21 +11,26 @@ import (
 	"syscall"
 	"time"
 
+	"net/http"
+
 	"github.com/esignoretti/bqcubbit/internal/bigquery"
 	"github.com/esignoretti/bqcubbit/internal/config"
 	"github.com/esignoretti/bqcubbit/internal/coordinator"
+	"github.com/esignoretti/bqcubbit/internal/metrics"
 	pq "github.com/esignoretti/bqcubbit/internal/parquet"
 	"github.com/esignoretti/bqcubbit/internal/rate"
 	"github.com/esignoretti/bqcubbit/internal/scheduler"
 	"github.com/esignoretti/bqcubbit/internal/state"
 	"github.com/esignoretti/bqcubbit/internal/storage"
 	"github.com/esignoretti/bqcubbit/internal/sync"
+	"github.com/esignoretti/bqcubbit/internal/webui"
+	"github.com/esignoretti/bqcubbit/internal/verify"
 )
 
 func main() {
 	log.SetFlags(0)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: bqcubbit [flags] <command>\n\nCommands:\n  sync   Export a table from BigQuery to Cubbit DS3\n  serve  Run as daemon with scheduler and WebUI\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: bqcubbit [flags] <command>\n\nCommands:\n  sync             Export a table from BigQuery to Cubbit DS3\n  serve            Run as daemon with scheduler\n  verify           Verify exported data against BigQuery\n  ack-schema-change Acknowledge a breaking schema change\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 
@@ -50,6 +55,18 @@ func main() {
 	case "serve":
 		if err := runServe(cfg); err != nil {
 			log.Fatalf("serve: %v", err)
+		}
+	case "verify":
+		if err := runVerify(cfg); err != nil {
+			log.Fatalf("verify: %v", err)
+		}
+	case "ack-schema-change":
+		table := flag.Arg(1)
+		if table == "" {
+			log.Fatal("usage: bqcubbit ack-schema-change <dataset.table>")
+		}
+		if err := runAckSchemaChange(cfg, table); err != nil {
+			log.Fatalf("ack: %v", err)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", flag.Arg(0))
@@ -191,5 +208,61 @@ func runServe(cfg *config.Config) error {
 		}
 	}
 
+	webHandler, err := webui.NewHandler()
+	if err != nil {
+		return fmt.Errorf("create webui: %w", err)
+	}
+
+	mux := http.NewServeMux()
+	webHandler.RegisterRoutes(mux)
+	mux.Handle("/metrics", metrics.MetricsHandler())
+
+	webServer := &http.Server{Addr: ":8080", Handler: mux}
+	go func() {
+		log.Printf("[webui] listening on :8080")
+		if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[webui] error: %v", err)
+		}
+	}()
+	defer webServer.Shutdown(context.Background())
+
 	return sched.Start(ctx)
+}
+
+func runVerify(cfg *config.Config) error {
+	return verify.RunCLI(context.Background(), verify.CLIConfig{
+		ProjectID:  cfg.Source.ProjectID,
+		Location:   cfg.Source.Location,
+		SampleRate: 0.01,
+	})
+}
+
+func runAckSchemaChange(cfg *config.Config, table string) error {
+	parts := strings.SplitN(table, ".", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid table format: %s (expected dataset.table)", table)
+	}
+
+	statePath := os.Getenv("BQCUBBIT_STATE")
+	if statePath == "" {
+		statePath = "bqcubbit_state.db"
+	}
+	store, err := state.NewSQLiteStore(statePath)
+	if err != nil {
+		return fmt.Errorf("state store: %w", err)
+	}
+	defer store.Close()
+	store.Init(context.Background())
+
+	ts, err := store.GetOrCreateTable(context.Background(), cfg.Source.ProjectID, parts[0], parts[1])
+	if err != nil {
+		return fmt.Errorf("get table: %w", err)
+	}
+
+	if err := store.AcknowledgeSchemaChange(context.Background(), ts.ID, ts.SchemaVersion); err != nil {
+		return fmt.Errorf("acknowledge: %w", err)
+	}
+
+	log.Printf("[ack] acknowledged schema change for %s", table)
+	return nil
 }
