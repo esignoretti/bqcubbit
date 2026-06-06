@@ -91,6 +91,16 @@ func runSync(cfg *config.Config) error {
 		return fmt.Errorf("init state: %w", err)
 	}
 
+	// Recover stale runs before starting a new one
+	if staleIDs, err := store.AbortStaleRuns(context.Background()); err != nil {
+		log.Printf("[main] warning: abort stale runs: %v", err)
+	} else if len(staleIDs) > 0 {
+		log.Printf("[main] aborted %d stale runs", len(staleIDs))
+		if n, err := store.CleanupStaleTasks(context.Background(), staleIDs); err == nil {
+			log.Printf("[main] cleaned %d stale tasks", n)
+		}
+	}
+
 	bqReader, err := bigquery.NewStorageReadReader(context.Background(), cfg.Source.ProjectID, cfg.Source.Location)
 	if err != nil {
 		return fmt.Errorf("bigquery reader: %w", err)
@@ -121,6 +131,11 @@ func runSync(cfg *config.Config) error {
 	go func() {
 		if err := storageClient.AbortStaleUploads(context.Background(), 24*time.Hour); err != nil {
 			log.Printf("[main] warning: cleanup stale uploads: %v", err)
+		}
+		if n, err := storageClient.DeleteObjects(context.Background(), "_staging/"); err != nil {
+			log.Printf("[main] warning: cleanup staging files: %v", err)
+		} else if n > 0 {
+			log.Printf("[main] removed %d stale staging files", n)
 		}
 	}()
 
@@ -196,6 +211,11 @@ func runServe(cfg *config.Config) error {
 	go func() {
 		if err := storageClient.AbortStaleUploads(ctx, 24*time.Hour); err != nil {
 			log.Printf("[serve] warning: cleanup stale uploads: %v", err)
+		}
+		if n, err := storageClient.DeleteObjects(ctx, "_staging/"); err != nil {
+			log.Printf("[serve] warning: cleanup staging files: %v", err)
+		} else if n > 0 {
+			log.Printf("[serve] removed %d stale staging files", n)
 		}
 	}()
 

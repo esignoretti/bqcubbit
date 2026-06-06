@@ -203,6 +203,19 @@ func (o *Orchestrator) syncTable(ctx context.Context, runID int64, dataset, tabl
 		log.Printf("[sync] table %s.%s at schema version v%d", dataset, table, schemaVersion)
 	}
 
+	// Filter to partitions modified since last sync (incremental recovery on gap)
+	var filtered []PartitionInfo
+	for _, p := range partitions {
+		if tableState.LastSyncWatermark != nil && !p.LastModifiedTime.After(*tableState.LastSyncWatermark) {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	if len(filtered) < len(partitions) {
+		log.Printf("[sync] %s.%s: filtered %d already-synced partitions", dataset, table, len(partitions)-len(filtered))
+	}
+	partitions = filtered
+
 	for _, p := range partitions {
 		if err := o.exportPartition(ctx, runID, tableState, arrowSchema, schemaVersion, p); err != nil {
 			log.Printf("[sync] error exporting partition %s: %v", p.PartitionID, err)
@@ -220,6 +233,16 @@ func (o *Orchestrator) syncTable(ctx context.Context, runID int64, dataset, tabl
 
 func (o *Orchestrator) exportPartition(ctx context.Context, runID int64, tableState *state.TableState, arrowSchema *arrow.Schema, schemaVersion int, p PartitionInfo) error {
 	log.Printf("[sync] exporting partition %s/%s", tableState.TableName, p.PartitionID)
+
+	// Check if this exact partition was already exported at the same path
+	ps, psErr := o.stateStore.GetOrCreatePartition(ctx, tableState.ID, p.PartitionID)
+	if psErr == nil && ps.LastExportedPath != "" {
+		exists, _ := o.storage.ObjectExists(ctx, ps.LastExportedPath)
+		if exists {
+			log.Printf("[sync] partition %s already exported at %s, skipping", p.PartitionID, ps.LastExportedPath)
+			return nil
+		}
+	}
 
 	stagingKey := fmt.Sprintf("_staging/%s/%s/%s/part-00000.zstd.parquet",
 		tableState.TableName, p.PartitionID, time.Now().UTC().Format("150405"))
@@ -265,6 +288,19 @@ func (o *Orchestrator) exportPartition(ctx context.Context, runID int64, tableSt
 	manifestData, _ := m.Serialize()
 	if err := o.storage.UploadStream(ctx, manifestKey, strings.NewReader(string(manifestData))); err != nil {
 		log.Printf("[sync] warning: upload manifest: %v", err)
+	}
+
+	if psErr == nil {
+		now := time.Now().UTC()
+		ps.SchemaVersion = schemaVersion
+		ps.LastSuccessfulSync = &now
+		ps.BytesInCubbit = int64(hashReader.TotalBytes())
+		ps.LastExportedPath = finalKey
+		if err := o.stateStore.UpdatePartitionSync(ctx, ps); err != nil {
+			log.Printf("[sync] warning: update partition state: %v", err)
+		}
+	} else {
+		log.Printf("[sync] warning: get/create partition state: %v", psErr)
 	}
 
 	log.Printf("[sync] completed partition %s (sha256: %s, %d bytes)", p.PartitionID, hashReader.SHA256(), hashReader.TotalBytes())

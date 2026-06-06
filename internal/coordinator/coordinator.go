@@ -77,6 +77,16 @@ func (c *Coordinator) RunOnce(ctx context.Context) (int64, error) {
 		c.mu.Unlock()
 	}()
 
+	staleIDs, err := c.stateStore.AbortStaleRuns(runCtx)
+	if err != nil {
+		log.Printf("[coordinator] warning: abort stale runs: %v", err)
+	} else if len(staleIDs) > 0 {
+		log.Printf("[coordinator] aborted %d stale runs", len(staleIDs))
+		if n, err := c.stateStore.CleanupStaleTasks(runCtx, staleIDs); err == nil {
+			log.Printf("[coordinator] cleaned %d stale tasks", n)
+		}
+	}
+
 	run, err := c.stateStore.BeginRun(runCtx)
 	if err != nil {
 		return 0, fmt.Errorf("begin run: %w", err)

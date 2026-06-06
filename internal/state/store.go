@@ -64,6 +64,7 @@ type PartitionState struct {
 	LastSuccessfulSync *time.Time
 	RowCount           int64
 	BytesInCubbit      int64
+	LastExportedPath   string
 }
 
 type DashboardTableSummary struct {
@@ -98,6 +99,8 @@ type StateStore interface {
 	AcknowledgeSchemaChange(ctx context.Context, tableID int64, version int) error
 	GetTableByID(ctx context.Context, tableID int64) (*TableState, error)
 	UpdatePartitionSync(ctx context.Context, ps *PartitionState) error
+	AbortStaleRuns(ctx context.Context) ([]int64, error)
+	CleanupStaleTasks(ctx context.Context, runIDs []int64) (int, error)
 
 	Close() error
 }

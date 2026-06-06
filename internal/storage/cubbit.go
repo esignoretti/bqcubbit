@@ -223,6 +223,38 @@ func (c *Client) GetObject(ctx context.Context, key string) (io.ReadCloser, erro
 	return resp.Body, nil
 }
 
+// DeleteObjects deletes multiple objects matching the given prefix (relative, without bucket prefix).
+func (c *Client) DeleteObjects(ctx context.Context, prefix string) (int, error) {
+	fullPrefix := c.prefix + "/" + prefix
+	paginator := s3.NewListObjectsV2Paginator(c.s3Client, &s3.ListObjectsV2Input{
+		Bucket: &c.bucket,
+		Prefix: &fullPrefix,
+	})
+	var total int
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return total, fmt.Errorf("list objects for delete: %w", err)
+		}
+		if len(page.Contents) == 0 {
+			continue
+		}
+		var objectIdentifiers []types.ObjectIdentifier
+		for _, obj := range page.Contents {
+			objectIdentifiers = append(objectIdentifiers, types.ObjectIdentifier{Key: obj.Key})
+		}
+		_, err = c.s3Client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: &c.bucket,
+			Delete: &types.Delete{Objects: objectIdentifiers, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			return total, fmt.Errorf("delete objects: %w", err)
+		}
+		total += len(objectIdentifiers)
+	}
+	return total, nil
+}
+
 func (c *Client) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
 	fullKey := c.prefix + "/" + key
 	_, err := c.s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{

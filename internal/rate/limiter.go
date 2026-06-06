@@ -33,5 +33,11 @@ func (l *Limiters) WaitUpload(ctx context.Context) error {
 }
 
 func (l *Limiters) WaitAll(ctx context.Context) error {
-	return nil
+	if err := l.BQReadSessions.Wait(ctx); err != nil {
+		return err
+	}
+	if err := l.BQExportJobs.Wait(ctx); err != nil {
+		return err
+	}
+	return l.CubbitUploads.Wait(ctx)
 }

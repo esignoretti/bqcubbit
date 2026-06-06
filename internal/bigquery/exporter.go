@@ -7,6 +7,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	gcs "cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
 
 	"github.com/esignoretti/bqcubbit/internal/storage"
 )
@@ -44,20 +45,75 @@ func (e *ExportDataBackend) Close() error {
 }
 
 // ExportPartition runs EXPORT DATA for a partition and transfers results to Cubbit.
-// This is a placeholder/canary — the full implementation needs partition column detection.
-// For Phase 3, implement the structure and a simple export that works for ingestion-time partitioned tables.
+// Uses EXPORT DATA with SELECT + WHERE _PARTITIONTIME for ingestion-time partitioned tables.
 func (e *ExportDataBackend) ExportPartition(ctx context.Context, dataset, table, partitionID string, schemaVersion int) ([]string, error) {
-	// Build EXPORT DATA SQL
-	// EXPORT DATA doesn't support WHERE clause filtering directly.
-	// Two approaches:
-	// 1. Export whole table (no filter) — simple but wasteful
-	// 2. Use a query-based export with SELECT + WHERE
-	// For Phase 3, implement approach 1 with a note that approach 2 needs partition column detection.
+	date, err := partitionIDToDate(partitionID)
+	if err != nil {
+		return nil, fmt.Errorf("parse partition ID: %w", err)
+	}
 
-	// The EXPORT DATA approach needs GCS bucket configured in the GCP project, not here.
-	// For Phase 3 MVP, export the whole table to GCS then transfer files.
+	gcsPrefix := fmt.Sprintf("%s/%s/%s/schema_version=v%d/%s", e.stagingPrefix, dataset, table, schemaVersion, partitionID)
+	uri := fmt.Sprintf("gs://%s/%s/*.parquet", e.stagingBucket, gcsPrefix)
 
-	return nil, fmt.Errorf("ExportDataBackend: not fully implemented — needs GCS bucket and partition column detection")
+	sql := fmt.Sprintf(`EXPORT DATA OPTIONS(
+		uri='%s',
+		format='PARQUET',
+		overwrite=true,
+		compression='ZSTD'
+	) AS
+	SELECT * FROM %s.%s
+	WHERE _PARTITIONTIME = TIMESTAMP('%s')`, uri, dataset, table, date)
+
+	job, err := e.bqClient.Query(sql).Run(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("start export job: %w", err)
+	}
+
+	status, err := job.Wait(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("export job wait: %w", err)
+	}
+	if status.Err() != nil {
+		return nil, fmt.Errorf("export job failed: %w", status.Err())
+	}
+
+	log.Printf("[exporter] EXPORT DATA job completed for %s.%s/%s", dataset, table, partitionID)
+
+	bkt := e.gcsClient.Bucket(e.stagingBucket)
+	it := bkt.Objects(ctx, &gcs.Query{Prefix: gcsPrefix})
+
+	var cubbitKeys []string
+	for {
+		attrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list gcs objects: %w", err)
+		}
+
+		fname := attrs.Name[len(gcsPrefix)+1:]
+		cubbitKey := fmt.Sprintf("%s/%s/schema_version=v%d/%s/%s", dataset, table, schemaVersion, partitionID, fname)
+		if err := e.transferFile(ctx, attrs.Name, cubbitKey); err != nil {
+			log.Printf("[exporter] warning: transfer %s: %v", attrs.Name, err)
+			continue
+		}
+		cubbitKeys = append(cubbitKeys, cubbitKey)
+
+		if err := bkt.Object(attrs.Name).Delete(ctx); err != nil {
+			log.Printf("[exporter] warning: delete gcs temp %s: %v", attrs.Name, err)
+		}
+	}
+
+	return cubbitKeys, nil
+}
+
+// partitionIDToDate converts a BigQuery ingestion-time partition ID (e.g. "20240101") to a date string.
+func partitionIDToDate(partitionID string) (string, error) {
+	if len(partitionID) == 8 {
+		return fmt.Sprintf("%s-%s-%s", partitionID[:4], partitionID[4:6], partitionID[6:8]), nil
+	}
+	return "", fmt.Errorf("unexpected partition ID format: %s", partitionID)
 }
 
 func (e *ExportDataBackend) transferFile(ctx context.Context, gcsPath, cubbitKey string) error {

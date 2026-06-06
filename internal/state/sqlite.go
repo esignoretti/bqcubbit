@@ -91,11 +91,18 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		last_successful_sync TIMESTAMP,
 		row_count INTEGER DEFAULT 0,
 		bytes_in_cubbit INTEGER DEFAULT 0,
+		last_exported_path TEXT DEFAULT '',
 		UNIQUE(table_id, partition_id)
 	);
 	`
-	_, err := s.db.ExecContext(ctx, schema)
-	return err
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, "ALTER TABLE partitions ADD COLUMN last_exported_path TEXT DEFAULT ''")
+	if err != nil {
+		_ = err // column already exists on fresh database
+	}
+	return nil
 }
 
 func (s *SQLiteStore) BeginRun(ctx context.Context) (*SyncRun, error) {
@@ -112,6 +119,50 @@ func (s *SQLiteStore) CompleteRun(ctx context.Context, runID int64, state string
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, "UPDATE sync_runs SET completed_at=?, state=? WHERE id=?", now, state, runID)
 	return err
+}
+
+func (s *SQLiteStore) AbortStaleRuns(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE sync_runs SET state='aborted', completed_at=datetime('now')
+		 WHERE state='running' AND started_at < datetime('now', '-24 hours')
+		 RETURNING id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if ids == nil {
+		ids = []int64{}
+	}
+	return ids, nil
+}
+
+func (s *SQLiteStore) CleanupStaleTasks(ctx context.Context, runIDs []int64) (int, error) {
+	if len(runIDs) == 0 {
+		return 0, nil
+	}
+	query := "DELETE FROM tasks WHERE sync_run_id IN ("
+	args := make([]interface{}, len(runIDs))
+	for i, id := range runIDs {
+		if i > 0 {
+			query += ","
+		}
+		query += "?"
+		args[i] = id
+	}
+	query += ")"
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func (s *SQLiteStore) GetOrCreateTable(ctx context.Context, project, dataset, tableName string) (*TableState, error) {
@@ -234,11 +285,11 @@ func (s *SQLiteStore) GetCurrentSchemaVersion(ctx context.Context, tableID int64
 
 func (s *SQLiteStore) GetOrCreatePartition(ctx context.Context, tableID int64, partitionID string) (*PartitionState, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, table_id, partition_id, schema_version, bq_last_modified, last_successful_sync, row_count, bytes_in_cubbit
+		`SELECT id, table_id, partition_id, schema_version, bq_last_modified, last_successful_sync, row_count, bytes_in_cubbit, COALESCE(last_exported_path,'')
 		 FROM partitions WHERE table_id=? AND partition_id=?`, tableID, partitionID)
 	ps := &PartitionState{}
 	var lastSync *time.Time
-	err := row.Scan(&ps.ID, &ps.TableID, &ps.PartitionID, &ps.SchemaVersion, &ps.BQLastModified, &lastSync, &ps.RowCount, &ps.BytesInCubbit)
+	err := row.Scan(&ps.ID, &ps.TableID, &ps.PartitionID, &ps.SchemaVersion, &ps.BQLastModified, &lastSync, &ps.RowCount, &ps.BytesInCubbit, &ps.LastExportedPath)
 	if err == sql.ErrNoRows {
 		now := time.Now().UTC()
 		res, err := s.db.ExecContext(ctx,
@@ -387,9 +438,9 @@ func (s *SQLiteStore) GetTableByID(ctx context.Context, tableID int64) (*TableSt
 
 func (s *SQLiteStore) UpdatePartitionSync(ctx context.Context, ps *PartitionState) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE partitions SET schema_version=?, bq_last_modified=?, last_successful_sync=?, row_count=?, bytes_in_cubbit=?
+		`UPDATE partitions SET schema_version=?, bq_last_modified=?, last_successful_sync=?, row_count=?, bytes_in_cubbit=?, last_exported_path=?
 		 WHERE id=?`,
-		ps.SchemaVersion, ps.BQLastModified, ps.LastSuccessfulSync, ps.RowCount, ps.BytesInCubbit, ps.ID)
+		ps.SchemaVersion, ps.BQLastModified, ps.LastSuccessfulSync, ps.RowCount, ps.BytesInCubbit, ps.LastExportedPath, ps.ID)
 	return err
 }
 
