@@ -1,3 +1,6 @@
 bqcubbit
 .DS_Store
 bqcubbit
+bqcubbit-key.json
+bqcubbit.yaml
+bqcubbit_state.db

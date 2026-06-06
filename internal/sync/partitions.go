@@ -3,7 +3,6 @@ package sync
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"cloud.google.com/go/bigquery"
@@ -27,28 +26,23 @@ func DiscoverPartitions(ctx context.Context, projectID, location string, dataset
 	}
 	defer client.Close()
 
-	placeholders := make([]string, len(datasets))
-	args := make([]bigquery.QueryParameter, len(datasets))
-	for i, ds := range datasets {
-		placeholders[i] = fmt.Sprintf("@dataset%d", i)
-		args[i] = bigquery.QueryParameter{Name: fmt.Sprintf("dataset%d", i), Value: ds}
+	var results []PartitionInfo
+	for _, ds := range datasets {
+		parts, err := discoverPartitionsForDataset(ctx, client, projectID, location, ds, watermark)
+		if err != nil {
+			return nil, fmt.Errorf("discover partitions for %s: %w", ds, err)
+		}
+		results = append(results, parts...)
 	}
+	return results, nil
+}
 
-	q := fmt.Sprintf(`
-		SELECT
-			table_catalog,
-			table_schema,
-			table_name,
-			partition_id,
-			total_rows,
-			total_logical_bytes,
-			last_modified_time
-		FROM %s.INFORMATION_SCHEMA.PARTITIONS
-		WHERE table_schema IN (%s)
-	`, regionQualified(projectID, location), strings.Join(placeholders, ", "))
+func discoverPartitionsForDataset(ctx context.Context, client *bigquery.Client, projectID, location, dataset string, watermark *time.Time) ([]PartitionInfo, error) {
+	q := fmt.Sprintf("SELECT table_catalog, table_schema, table_name, partition_id, total_rows, total_logical_bytes, last_modified_time FROM `%s.%s.INFORMATION_SCHEMA.PARTITIONS` WHERE partition_id IS NOT NULL", projectID, dataset)
 
+	var args []bigquery.QueryParameter
 	if watermark != nil {
-		q += fmt.Sprintf(" AND last_modified_time > @watermark")
+		q += " WHERE last_modified_time > @watermark"
 		args = append(args, bigquery.QueryParameter{Name: "watermark", Value: *watermark})
 	}
 
@@ -91,19 +85,5 @@ func DiscoverPartitions(ctx context.Context, projectID, location string, dataset
 			LastModifiedTime:  row.LastModifiedTime,
 		})
 	}
-
 	return results, nil
-}
-
-// regionQualified returns a region-qualified table reference for INFORMATION_SCHEMA queries.
-// For the "US" or "EU" locations, no region prefix is needed.
-// For regional locations (e.g. "us-west1"), the regional dataset prefix is used.
-func regionQualified(projectID, location string) string {
-	loc := strings.ToLower(location)
-	switch loc {
-	case "us", "eu", "":
-		return fmt.Sprintf("`%s.INFORMATION_SCHEMA`", projectID)
-	default:
-		return fmt.Sprintf("`%s.region-%s.INFORMATION_SCHEMA`", projectID, loc)
-	}
 }

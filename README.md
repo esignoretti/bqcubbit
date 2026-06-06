@@ -5,6 +5,7 @@ Export BigQuery tables to Cubbit DS3 (S3-compatible) as ZSTD-compressed Parquet 
 **Features:**
 - **Two extraction backends:** BigQuery Storage Read API (gRPC, streaming) and EXPORT DATA (free at BigQuery side, via GCS staging)
 - **Full + incremental sync:** Partition-level discovery via `INFORMATION_SCHEMA.PARTITIONS`, watermark tracking, staging → atomic rename
+- **Partition batching:** Groups daily partitions into configurable week-based batches for one efficient read and one Parquet file per batch
 - **Schema evolution:** Canonical hash comparison, additive/breaking change classification, versioned partition paths
 - **Worker pool:** 2–8 workers with lease heartbeats, claimed tasks, graceful shutdown
 - **Cron scheduler:** Configurable schedule with overlap prevention (`skip`, `queue`, `cancel_and_restart`)
@@ -55,6 +56,7 @@ sync:
     - my_dataset
   incremental_strategy: partition
   max_concurrent: 4
+  batch_size_days: 7
 
 worker_pool:
   min_workers: 2

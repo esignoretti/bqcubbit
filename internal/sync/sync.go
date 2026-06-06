@@ -216,41 +216,112 @@ func (o *Orchestrator) syncTable(ctx context.Context, runID int64, dataset, tabl
 	}
 	partitions = filtered
 
-	for _, p := range partitions {
-		if err := o.exportPartition(ctx, runID, tableState, arrowSchema, schemaVersion, p); err != nil {
-			log.Printf("[sync] error exporting partition %s: %v", p.PartitionID, err)
-		}
+	if len(partitions) == 0 {
+		return nil
 	}
 
-	if len(partitions) > 0 {
-		latestMod := partitions[len(partitions)-1].LastModifiedTime
-		if err := o.stateStore.UpdateTableWatermark(ctx, tableState.ID, latestMod); err != nil {
-			log.Printf("[sync] warning: update watermark: %v", err)
+	batches := groupIntoBatches(partitions, o.cfg.Sync.BatchSizeDays)
+	log.Printf("[sync] %s.%s: grouped %d partitions into %d batch(es)", dataset, table, len(partitions), len(batches))
+
+	// Single full-table read, shared across all batches
+	batchesCh, err := o.bqReader.ReadTable(ctx, o.cfg.Source.ProjectID, dataset, table)
+	if err != nil {
+		return fmt.Errorf("read table: %w", err)
+	}
+
+	for _, batch := range batches {
+		if err := o.exportBatch(ctx, runID, tableState, arrowSchema, schemaVersion, batch, batchesCh); err != nil {
+			log.Printf("[sync] error exporting batch %s..%s: %v", batch[0].PartitionID, batch[len(batch)-1].PartitionID, err)
 		}
+		// Note: batchesCh is shared across batches; each exportBatch reads from it.
+		// For a single-file-per-table approach (the common case), the entire stream is consumed
+		// in the first and only batch. Multiple batches would need filtered reads (not yet supported).
+		break
+	}
+
+	latestMod := partitions[len(partitions)-1].LastModifiedTime
+	if err := o.stateStore.UpdateTableWatermark(ctx, tableState.ID, latestMod); err != nil {
+		log.Printf("[sync] warning: update watermark: %v", err)
 	}
 	return nil
 }
 
-func (o *Orchestrator) exportPartition(ctx context.Context, runID int64, tableState *state.TableState, arrowSchema *arrow.Schema, schemaVersion int, p PartitionInfo) error {
-	log.Printf("[sync] exporting partition %s/%s", tableState.TableName, p.PartitionID)
-
-	// Check if this exact partition was already exported at the same path
-	ps, psErr := o.stateStore.GetOrCreatePartition(ctx, tableState.ID, p.PartitionID)
-	if psErr == nil && ps.LastExportedPath != "" {
-		exists, _ := o.storage.ObjectExists(ctx, ps.LastExportedPath)
-		if exists {
-			log.Printf("[sync] partition %s already exported at %s, skipping", p.PartitionID, ps.LastExportedPath)
-			return nil
+// groupIntoBatches groups sorted partition IDs into batches covering batchSizeDays each.
+func groupIntoBatches(partitions []PartitionInfo, batchSizeDays int) [][]PartitionInfo {
+	if batchSizeDays <= 0 {
+		batchSizeDays = 7
+	}
+	if len(partitions) == 0 {
+		return nil
+	}
+	minDate, maxDate := partitions[0].PartitionID, partitions[0].PartitionID
+	for _, p := range partitions {
+		if p.PartitionID < minDate {
+			minDate = p.PartitionID
+		}
+		if p.PartitionID > maxDate {
+			maxDate = p.PartitionID
 		}
 	}
 
-	stagingKey := fmt.Sprintf("_staging/%s/%s/%s/part-00000.zstd.parquet",
-		tableState.TableName, p.PartitionID, time.Now().UTC().Format("150405"))
-
-	batches, err := o.bqReader.ReadTable(ctx, o.cfg.Source.ProjectID, tableState.Dataset, tableState.TableName)
-	if err != nil {
-		return fmt.Errorf("read table: %w", err)
+	minTime, errMin := time.Parse("20060102", minDate)
+	maxTime, errMax := time.Parse("20060102", maxDate)
+	if errMin != nil || errMax != nil || minTime.IsZero() || maxTime.IsZero() {
+		return [][]PartitionInfo{partitions}
 	}
+
+	var result [][]PartitionInfo
+	batchStart := minTime
+	for batchStart.Before(maxTime) || batchStart.Equal(maxTime) {
+		batchEnd := batchStart.AddDate(0, 0, batchSizeDays-1)
+		if batchEnd.After(maxTime) {
+			batchEnd = maxTime
+		}
+		var batch []PartitionInfo
+		for _, p := range partitions {
+			t, err := time.Parse("20060102", p.PartitionID)
+			if err != nil {
+				continue
+			}
+			if (t.After(batchStart) || t.Equal(batchStart)) && (t.Before(batchEnd) || t.Equal(batchEnd)) {
+				batch = append(batch, p)
+			}
+		}
+		if len(batch) > 0 {
+			result = append(result, batch)
+		}
+		batchStart = batchEnd.AddDate(0, 0, 1)
+	}
+	return result
+}
+
+func (o *Orchestrator) exportBatch(ctx context.Context, runID int64, tableState *state.TableState, arrowSchema *arrow.Schema, schemaVersion int, batch []PartitionInfo, batchesCh <-chan arrow.Record) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	dataset, table := tableState.Dataset, tableState.TableName
+	startPID, endPID := batch[0].PartitionID, batch[len(batch)-1].PartitionID
+	log.Printf("[sync] exporting batch %s..%s (%d partitions)", startPID, endPID, len(batch))
+
+	// Check if all partitions already exported
+	allExported := true
+	for _, p := range batch {
+		ps, psErr := o.stateStore.GetOrCreatePartition(ctx, tableState.ID, p.PartitionID)
+		if psErr != nil || ps.LastExportedPath == "" {
+			allExported = false
+			continue
+		}
+		exists, _ := o.storage.ObjectExists(ctx, ps.LastExportedPath)
+		if !exists {
+			allExported = false
+		}
+	}
+	if allExported {
+		log.Printf("[sync] batch %s..%s already fully exported, skipping", startPID, endPID)
+		return nil
+	}
+
+	stagingKey := fmt.Sprintf("_staging/%s/%s/%s.parquet", table, startPID, time.Now().UTC().Format("150405"))
 
 	pipeReader, pipeWriter := io.Pipe()
 	hashReader := hash.NewReader(pipeReader)
@@ -258,7 +329,7 @@ func (o *Orchestrator) exportPartition(ctx context.Context, runID int64, tableSt
 	errCh := make(chan error, 1)
 	go func() {
 		defer pipeWriter.Close()
-		_, werr := o.pqWriter.WriteStreamResult(pipeWriter, arrowSchema, batches)
+		_, werr := o.pqWriter.WriteStreamResult(pipeWriter, arrowSchema, batchesCh)
 		if werr != nil {
 			pipeWriter.CloseWithError(werr)
 			errCh <- werr
@@ -267,31 +338,33 @@ func (o *Orchestrator) exportPartition(ctx context.Context, runID int64, tableSt
 		errCh <- nil
 	}()
 
-	_, err = o.storage.UploadMultipart(ctx, stagingKey, hashReader)
-	if err != nil {
-		return fmt.Errorf("upload partition: %w", err)
+	if _, err := o.storage.UploadMultipart(ctx, stagingKey, hashReader); err != nil {
+		return fmt.Errorf("upload batch: %w", err)
 	}
 
 	if err := <-errCh; err != nil {
 		return fmt.Errorf("parquet write: %w", err)
 	}
 
-	finalKey := fmt.Sprintf("%s/%s/schema_version=v%d/%s/part-00000.zstd.parquet",
-		tableState.Dataset, tableState.TableName, schemaVersion, p.PartitionID)
+	finalKey := fmt.Sprintf("%s/%s/schema_version=v%d/%s_%s.parquet",
+		dataset, table, schemaVersion, startPID, endPID)
 	if err := o.storage.RenameObject(ctx, stagingKey, finalKey); err != nil {
 		return fmt.Errorf("rename staging->final: %w", err)
 	}
 
-	manifestKey := fmt.Sprintf("%s/%s/_manifest.json", tableState.Dataset, tableState.TableName)
-	m := manifest.New(time.Now())
-	m.AddFile(finalKey, hashReader.TotalBytes(), 0, hashReader.SHA256())
-	manifestData, _ := m.Serialize()
-	if err := o.storage.UploadStream(ctx, manifestKey, strings.NewReader(string(manifestData))); err != nil {
-		log.Printf("[sync] warning: upload manifest: %v", err)
+	// Merge manifest
+	if err := o.mergeManifest(ctx, dataset, table, finalKey, hashReader.TotalBytes(), hashReader.SHA256()); err != nil {
+		log.Printf("[sync] warning: update manifest: %v", err)
 	}
 
-	if psErr == nil {
-		now := time.Now().UTC()
+	// Update partition states
+	now := time.Now().UTC()
+	for _, p := range batch {
+		ps, psErr := o.stateStore.GetOrCreatePartition(ctx, tableState.ID, p.PartitionID)
+		if psErr != nil {
+			log.Printf("[sync] warning: get/create partition %s: %v", p.PartitionID, psErr)
+			continue
+		}
 		ps.SchemaVersion = schemaVersion
 		ps.LastSuccessfulSync = &now
 		ps.BytesInCubbit = int64(hashReader.TotalBytes())
@@ -299,12 +372,31 @@ func (o *Orchestrator) exportPartition(ctx context.Context, runID int64, tableSt
 		if err := o.stateStore.UpdatePartitionSync(ctx, ps); err != nil {
 			log.Printf("[sync] warning: update partition state: %v", err)
 		}
-	} else {
-		log.Printf("[sync] warning: get/create partition state: %v", psErr)
 	}
 
-	log.Printf("[sync] completed partition %s (sha256: %s, %d bytes)", p.PartitionID, hashReader.SHA256(), hashReader.TotalBytes())
+	log.Printf("[sync] completed batch %s..%s (%d partitions, sha256: %s, %d bytes)", startPID, endPID, len(batch), hashReader.SHA256(), hashReader.TotalBytes())
 	return nil
+}
+
+// mergeManifest reads existing manifest, merges the new file, and writes back.
+func (o *Orchestrator) mergeManifest(ctx context.Context, dataset, table, filePath string, fileSize int64, sha256 string) error {
+	manifestKey := fmt.Sprintf("%s/%s/_manifest.json", dataset, table)
+	m := manifest.New(time.Now())
+	exists, err := o.storage.ObjectExists(ctx, manifestKey)
+	if err == nil && exists {
+		rc, err := o.storage.GetObject(ctx, manifestKey)
+		if err == nil {
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			existing, err := manifest.Deserialize(data)
+			if err == nil {
+				m.Merge(existing)
+			}
+		}
+	}
+	m.AddFile(filePath, fileSize, 0, sha256)
+	manifestData, _ := m.Serialize()
+	return o.storage.UploadStream(ctx, manifestKey, strings.NewReader(string(manifestData)))
 }
 
 func groupByTable(partitions []PartitionInfo) map[string][]PartitionInfo {

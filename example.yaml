@@ -19,6 +19,7 @@ sync:
     - analytics
   incremental_strategy: full_refresh
   max_concurrent: 4
+  batch_size_days: 7
   tables:
     - match: analytics.events
     - match: analytics.users

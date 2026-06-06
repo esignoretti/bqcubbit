@@ -26,8 +26,13 @@ FROM UNNEST(GENERATE_ARRAY(1, 10000)) AS a,
 
 -- Verify
 SELECT COUNT(*) AS total_rows FROM bqcubbit_test.events;
-SELECT COUNT(DISTINCT _PARTITIONTIME) AS partition_count FROM bqcubbit_test.events;
+SELECT COUNT(DISTINCT DATE(event_timestamp)) AS partition_count FROM bqcubbit_test.events;
 SELECT MIN(event_timestamp), MAX(event_timestamp) FROM bqcubbit_test.events;
+
+-- List partitions via INFORMATION_SCHEMA
+SELECT table_name, partition_id, total_rows
+FROM `your-project.bqcubbit_test.INFORMATION_SCHEMA.PARTITIONS`
+WHERE table_name = 'events';
 ```
 
 ## 2. Create a second table for multi-table testing
@@ -50,23 +55,22 @@ FROM UNNEST(GENERATE_ARRAY(1, 1000)) AS n;
 # Set your project
 export PROJECT_ID=your-gcp-project-id
 
-# Create service account
+# Create service account (you need roles/iam.serviceAccountAdmin or Owner)
 gcloud iam service-accounts create bqcubbit \
   --display-name="BQCubbit Export Service"
 
-# Grant BigQuery Storage Admin (for Storage Read API)
+# Grant BigQuery roles for the service account
+# If you get "does not have permission", ask a Project Owner to run these:
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:bqcubbit@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:bqcubbit@$PROJECT_ID.iam.serviceaccount.com" \
   --role="roles/bigquery.admin"
-
-# Grant BigQuery Job User (for EXPORT DATA queries)
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:bqcubbit@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:bqcubbit@$PROJECT_ID.iam.serviceaccount.com" \
   --role="roles/bigquery.jobUser"
 
 # Create and download key
 gcloud iam service-accounts keys create bqcubbit-key.json \
-  --iam-account="bqcubbit@$PROJECT_ID.iam.gserviceaccount.com"
+  --iam-account="bqcubbit@$PROJECT_ID.iam.serviceaccount.com"
 ```
 
 Set the environment variable for local testing:
@@ -74,6 +78,15 @@ Set the environment variable for local testing:
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/bqcubbit-key.json
 ```
+
+> **Note:** If you get `The caller does not have permission` when running `gcloud projects add-iam-policy-binding`, you don't have IAM role-assignment rights on the GCP project. Ask a Project Owner to run the two `add-iam-policy-binding` commands, or use your own user credentials instead:
+>
+> ```bash
+> gcloud auth application-default login
+> unset GOOGLE_APPLICATION_CREDENTIALS
+> ```
+>
+> This authenticates bqcubbit as your user (no service account needed). Works if your GCP user has `bigquery.admin` or equivalent access.
 
 ## 4. Create a Cubbit DS3 bucket (or use MinIO)
 
@@ -117,6 +130,7 @@ sync:
     - bqcubbit_test
   incremental_strategy: full_refresh       # first run: export everything
   max_concurrent: 4
+  batch_size_days: 7                       # group daily partitions into weekly batches
 
 worker_pool:
   min_workers: 2
@@ -143,10 +157,12 @@ GOOGLE_APPLICATION_CREDENTIALS=bqcubbit-key.json \
 Expected output:
 ```
 [sync] starting sync run (strategy: full_refresh)
-[sync] discovered 381 partitions
-[sync] processing table bqcubbit_test.events (380 partitions)
+[sync] discovered 269 partitions
+[sync] processing table bqcubbit_test.events (269 partitions)
+[sync] bqcubbit_test.events: grouped 269 partitions into 38 batch(es)
+[sync] exporting batch 20260407..20260413 (7 partitions)
 ...
-[sync] completed partition 20260101 (sha256: ..., 12345 bytes)
+[sync] completed batch 20260407..20260413 (7 partitions, sha256: ..., 12345 bytes)
 ```
 
 ## 7. Run as daemon with WebUI

@@ -18,9 +18,10 @@ type Config struct {
 }
 
 type SourceConfig struct {
-	ProjectID string   `yaml:"project_id"`
-	Location  string   `yaml:"location"`
-	Datasets  []string `yaml:"datasets"`
+	ProjectID       string   `yaml:"project_id"`
+	Location        string   `yaml:"location"`
+	Datasets        []string `yaml:"datasets"`
+	PartitionColumn string   `yaml:"partition_column"`
 }
 
 type DestinationConfig struct {
@@ -70,6 +71,7 @@ type SyncConfig struct {
 	MaxConcurrent       int               `yaml:"max_concurrent"`
 	ExtractionMethod    string            `yaml:"extraction_method"`
 	MaxPartitionSizeGB  int               `yaml:"max_partition_size_gb"`
+	BatchSizeDays       int               `yaml:"batch_size_days"`
 }
 
 func (c *Config) Validate() error {
